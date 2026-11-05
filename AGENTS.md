@@ -8,6 +8,7 @@ folder: a checkout, or `~/fronk/src` after installation.
 
 | The person wants to... | Read |
 |---|---|
+| Set up Fronk on their computers from nothing | `docs/llm/SETUP.md` |
 | Fix something that stopped or fails | `docs/llm/DEBUG.md` |
 | Connect computers and set up a cluster | `docs/llm/NETWORK.md` |
 | Install, resume, upgrade or uninstall | `docs/llm/INSTALL.md` |

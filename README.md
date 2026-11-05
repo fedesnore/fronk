@@ -61,8 +61,14 @@ model fits and the estimated speed, before you download anything.
 
 ## Install
 
-Download a manager from the [Releases page](https://github.com/fedesnore/fronk/releases/tag/v0.3.0)
-and use the same way on every computer. **The terminal is the recommended, more
+**The easy way: let a coding agent do it.** You do not need to know networking. Open
+Codex or Claude Code on the computer with the best GPU and paste the whole of
+[`docs/llm/SETUP.md`](docs/llm/SETUP.md). It connects the computers, installs Fronk and
+checks a real chat, asking only for what needs your hands or your yes.
+
+**To do it yourself,** download a manager from the
+[Releases page](https://github.com/fedesnore/fronk/releases/tag/v0.3.0) and use the
+same way on every computer. **The terminal is the recommended, more
 robust path.** The graphical manager runs the same steps but is experimental: it
 has had less testing, so switch to the terminal if it misbehaves.
 
@@ -80,10 +86,7 @@ has had less testing, so switch to the terminal if it misbehaves.
    the exact file. Fronk verifies it and sends each node its slices.
 5. **Start chat.** Review the plan, choose **Proceed**, and wait for the checks.
 
-SSH is not required, but it is the easiest way to let a coding agent take the install
-to the end for you: it works through the terminal manager, one computer at a time.
-See [install with a coding agent](docs/INSTALL.md#install-with-a-coding-agent).
-Read the [checklist before you begin](docs/INSTALL.md#what-to-have-ready)
+SSH is not required. Read the [checklist before you begin](docs/INSTALL.md#what-to-have-ready)
 and, if cables and IP addresses are new to you, [how to connect the computers](docs/NETWORK.md).
 The [installation guide](docs/INSTALL.md) covers each screen, upgrades and uninstalling.
 

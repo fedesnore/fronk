@@ -34,9 +34,8 @@ tell me which computer to use. Keep my configuration and verified weights.
 Setting up from scratch:
 
 ```text
-Read docs/llm/NETWORK.md. Help me connect these computers and install Fronk:
-[machines and cables]. Tell me which machine to act on at each step. Show me any
-network change before making it.
+Follow docs/llm/SETUP.md. Connect my computers and install Fronk, asking only for
+what needs my hands or my yes.
 ```
 
 Chat works but feels slow:

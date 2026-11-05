@@ -1,5 +1,9 @@
 # Connect the head and nodes
 
+**You do not need to learn this to use Fronk.** Paste [`docs/llm/SETUP.md`](llm/SETUP.md) into
+Codex or Claude Code and it plans and applies the network with you. This guide is for doing
+it by hand.
+
 Start on the **head**. Connect and configure the network before the installer's
 node verification. Fronk discovers reachable machines and measures their paths;
 it does not assign IP addresses or change operating-system network settings.

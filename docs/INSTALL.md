@@ -1,5 +1,8 @@
 # Install a Fronk cluster
 
+**Prefer not to do this by hand?** Paste [`docs/llm/SETUP.md`](llm/SETUP.md) into Codex or
+Claude Code on the head. It takes care of the network too.
+
 Begin on the **head**, which runs the dense part of the model on its GPU and
 coordinates chat. Keep its manager open while visiting the nodes. A **node**
 holds and computes expert slices through its CPU or GPU backend; it receives
@@ -224,14 +227,9 @@ The terminal manager lets a coding agent carry the whole installation, because e
 step has a command that asks nothing. If you enable SSH to your nodes, it can also
 work on each of them from the head.
 
-Open the agent on the head, in the folder holding `fronk-manager.sh` or a clone of
-this repository, and ask:
-
-```text
-Read docs/llm/INSTALL.md and install Fronk with the terminal manager. This computer
-is the head; the nodes are [names and SSH hosts]. Tell me before each step and which
-computer it changes. Never show the pairing code or ask for passwords.
-```
+Open Codex or Claude Code on the head and paste the whole of
+[`docs/llm/SETUP.md`](llm/SETUP.md). You do not need to know networking: the agent plans
+the connections, shows you each change and tells you which cable to plug in.
 
 Stay close, because two things remain yours:
 
