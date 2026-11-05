@@ -237,8 +237,9 @@ the connections, shows you each change and tells you which cable to plug in.
 
 Stay close, because two things remain yours:
 
-- **Your access.** Enable Remote Login on each node, and type each computer's password
-  yourself in the one command the agent gives you. Never give the agent a password. It
+- **Your access.** The agent asks how many nodes you are connecting and of what type, and
+  guides you if SSH is not enabled on them yet. You type each computer's password yourself,
+  in your terminal, in the one command it gives you. Never give the agent a password. It
   pipes the pairing code to each node, so it does not need to read it.
 - **Local Network on each Mac node.** Log in on that Mac and accept the permission on
   its screen when it appears. The agent installs the node as a service: a node started

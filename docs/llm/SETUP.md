@@ -41,36 +41,47 @@ mkdir -p source && tail -n +"$line" fronk-manager.sh | tar -xzf - -C source
 The briefs are in `source/fronk/docs/llm/`. Read `AGENTS.md`, `docs/llm/NETWORK.md` and
 `docs/llm/INSTALL.md` there. If a download fails, ask the person to paste those files.
 
-## 2. Learn what they have
+## 2. Ask how many nodes and of what type
 
-Ask only this, in one message:
+Inspect this computer yourself first. Then ask only this, in one message:
 
-1. Which computers do you want to use? A rough description is enough.
-2. Which one is the head? Suggest the Mac with Apple Silicon. Other heads are experimental.
-3. What cables do you have, and are they all on the same home network?
-4. Do you already have the file `Qwen3.8-Flash-Next-Q4.gguf` (177 GB)?
+1. How many node computers are you connecting? This one, the head, is not counted.
+2. What type is each one: Mac or Linux, and roughly which model and how much memory? A
+   rough description is enough, and you will read the details over SSH.
+3. Is SSH already enabled on them? If they do not know, the answer is "not yet".
+4. What cables do you have, and are they all on the same home network?
+5. Do you already have the file `Qwen3.8-Flash-Next-Q4.gguf` (177 GB)?
 
-Inspect this computer yourself. Do not ask for anything you can read. Windows is not
-supported, and a computer that cannot run Fronk is not a failure: say so and go on.
+Suggest a Mac with Apple Silicon as the head; other heads are experimental. Windows is not
+supported: a computer that cannot run Fronk is not a failure, so say so and go on.
 
 ## 3. Open SSH from the head to each node
 
-You work from the head: SSH is how you send each node its software and check its
-connections. Set it up first, over the network the computers already share.
+You run on the head and do everything on the nodes over SSH: that is how you send them the
+software and check their connections. Set it up node by node, over the network the
+computers already share, before anything else.
 
-1. Ask them to enable it once on each node. On a Mac: System Settings, General, Sharing,
-   Remote Login. On Linux, give the exact command for that computer.
-2. Find each node yourself: try `NAME.local`, `dns-sd -B _ssh._tcp` on a Mac, or the
-   addresses on this network. Ask them only for what you cannot find, such as the user
-   name on that computer.
-3. Create a key just for this setup, if there is none:
+**If SSH is not enabled on a node, guide them there, one step at a time:**
+
+- Mac: System Settings, General, Sharing, turn on **Remote Login**.
+- Linux: in a terminal on that computer, `sudo apt install openssh-server` and
+  `sudo systemctl enable --now ssh`. Adapt to its distribution. The `sudo` password is
+  typed there, by them.
+- Then ask them to read you two things from a terminal on that node, its user name and
+  address: `whoami`, and on a Mac `ipconfig getifaddr en0` or on Linux `hostname -I`.
+  Try `NAME.local` or `dns-sd -B _ssh._tcp` first, so they read less.
+
+**Then connect, with the password typed in their terminal, never to you:**
+
+1. Create a key just for this setup, if there is none:
    `ssh-keygen -t ed25519 -N '' -f ~/.ssh/fronk_setup`. Say what it is and that they can
    remove it at the end.
-4. Ask them to run one command per node in their own terminal, on the head, and type that
-   computer's password there: `ssh-copy-id -i ~/.ssh/fronk_setup.pub USER@HOST`. You never
-   see the password, and you never ask for it.
-5. Check each one: `ssh -i ~/.ssh/fronk_setup -o BatchMode=yes USER@HOST 'uname -sm; hostname'`.
-   Use this key for every command below.
+2. Give them one command per node to run in their own terminal on the head:
+   `ssh-copy-id -i ~/.ssh/fronk_setup.pub USER@HOST`. Tell them it may ask to accept the
+   computer, then for that computer's password, and that nothing appears while they type.
+   You never see the password, and you never ask for it in this conversation.
+3. Check each one: `ssh -i ~/.ssh/fronk_setup -o BatchMode=yes -o IdentitiesOnly=yes USER@HOST 'uname -sm; hostname'`.
+   Use this key for every command below. Compare what you read with what they told you.
 
 If SSH reports `Host key verification failed`, do not turn the check off or delete the old
 key yourself. The computer is new to this one, or it changed: ask them to confirm it is theirs,
