@@ -141,7 +141,8 @@ set_conf() {
 }
 source "$HERE/service.sh"
 source "$HERE/modules.sh"
-step "Fronk Installer Manager $VERSION · $(hostname -s) · $OS $ARCH"
+# --pairing-code feeds a pipe: its output must be the code and nothing else.
+[[ $action == --pairing-code ]] || step "Fronk Installer Manager $VERSION · $(hostname -s) · $OS $ARCH"
 installed=""
 if [[ -x $WORK/fronk && -f $CONF && -f $WORK/tools/install/fronk-install.sh ]]; then
     if [[ -f $STATE/install-role ]]; then installed=$(cat "$STATE/install-role")

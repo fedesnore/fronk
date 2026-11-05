@@ -16,7 +16,8 @@ if [[ ${1:-} == check-peers ]]; then
     grep -Fq "All 2 planned nodes authenticated" "$prefix/join.log"
     # An agent pipes the code to --secret-stdin; it never goes to a terminal.
     [[ -s $prefix/state/cluster.secret ]] || printf 'fixture\n' > "$prefix/state/cluster.secret"
-    "$manager" --prefix "$prefix" --pairing-code | grep -Eq '^fronk-v1:[1-4]:[^[:space:]]+$'
+    # The whole output must be the code: --secret-stdin reads only the first line.
+    [[ $("$manager" --prefix "$prefix" --pairing-code) =~ ^fronk-v1:[1-4]:[^[:space:]]+$ ]]
     if "$manager" --prefix "$prefix" --join-nodes --demo-later --yes --nodes missing > "$prefix/missing.log" 2>&1; then
         echo "An absent node passed verification" >&2; exit 1
     fi

@@ -34,7 +34,7 @@ grep ' fronk-manager.sh$' SHA256SUMS | shasum -a 256 -c
 Then read its guides without installing yet:
 
 ```sh
-line=$(awk '/^__FRONK_PAYLOAD__$/ {print NR + 1; exit}' fronk-manager.sh)
+line=$(LC_ALL=C awk '/^__FRONK_PAYLOAD__$/ {print NR + 1; exit}' fronk-manager.sh)
 mkdir -p source && tail -n +"$line" fronk-manager.sh | tar -xzf - -C source
 ```
 
