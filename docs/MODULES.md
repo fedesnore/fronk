@@ -71,3 +71,5 @@ GitHub's separation between [workflow_run events](https://docs.github.com/en/act
 and [label API operations](https://docs.github.com/en/rest/issues/labels).
 The path rules and classifier are tested locally; the hosted workflow must also
 be checked after the repository is published.
+
+<!-- Test of pull request labels. This branch is not merged. -->
