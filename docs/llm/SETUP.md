@@ -72,6 +72,10 @@ connections. Set it up first, over the network the computers already share.
 5. Check each one: `ssh -i ~/.ssh/fronk_setup -o BatchMode=yes USER@HOST 'uname -sm; hostname'`.
    Use this key for every command below.
 
+If SSH reports `Host key verification failed`, do not turn the check off or delete the old
+key yourself. The computer is new to this one, or it changed: ask them to confirm it is theirs,
+then to connect once in their own terminal and accept it.
+
 If a node cannot be reached, say which computer and what to check there, one thing at a
 time. Do not go on until every node answers. If an action needs an administrator password
 on a node, give them the exact command to run in a terminal on that computer.
