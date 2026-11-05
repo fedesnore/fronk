@@ -37,6 +37,8 @@ ask() { # question, default, optional choices separated by |, optional secret
         printf '@prompt\t%s\t%s\t%s\t%s\n' "$1" "$2" "${3:-}" "${4:-}" >&2
         IFS= read -r answer || exit 1
     else
+        # An agent or script has no terminal to answer on: say what to pass instead.
+        { : </dev/tty; } 2>/dev/null || die "this step needs an answer and no terminal is attached: $1 Rerun with --yes and explicit options (--help lists them; a new node also needs --secret-stdin)."
         if [[ -n ${3:-} ]]; then
             IFS='|' read -r -a choices <<< "$3"
             printf '%s\n' "$1" >&2
@@ -74,6 +76,7 @@ Fronk Installer Manager $VERSION
   --download-dir FOLDER              destination for a resumed or new download
   --join-nodes | --configure-model   resume setup on an installed head
   --web-console                      open the head and node dashboard in your browser
+  --pairing-code                     write the head's pairing code to a pipe, for --secret-stdin
   --status                           check an installed node with authenticated INFO
   --run | --stop                     run the installed program or stop a registered node
   --uninstall [--purge]              remove programs; purge also erases managed state
@@ -93,7 +96,7 @@ while (($#)); do
         --gui) gui=1 ;; --terminal) gui=0 ;; --dialog) dialog=1 ;;
         --yes|-y) yes=1 ;; --secret-stdin) secret_stdin=1 ;; --download) download=1 ;;
         --demo-later) demo_later=1 ;; --no-service) no_service=1 ;; --no-measure) measure=0 ;; --purge) purge=1 ;;
-        --uninstall|--join-nodes|--configure-model|--status|--run|--stop|--web-console)
+        --uninstall|--join-nodes|--configure-model|--pairing-code|--status|--run|--stop|--web-console)
             [[ -z $action ]] || die "choose one manager action"; action=$1 ;;
         --help|-h) usage; exit 0 ;; *) die "unknown option $1 (see --help)" ;;
     esac; shift
@@ -185,6 +188,9 @@ if [[ $action == --run ]]; then
     if ((dialog)); then printf '@running\n'; fi
     if [[ $installed == node ]]; then exec ./fronk node --config "$CONF"
     elif ((dialog)); then exec python3 tools/fronk-web.py --open
+    # Without a terminal the head would read end-of-input at its prompts and quit.
+    # The console keeps it running and proceeds by itself when the plan fits.
+    elif ! { : </dev/tty; } 2>/dev/null; then exec python3 tools/fronk-web.py --start
     else exec bash tools/install/terminal-head.sh "$STATE" --config "$CONF"; fi
 fi
 if [[ $action == --stop ]]; then
@@ -193,6 +199,13 @@ if [[ $action == --stop ]]; then
         if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then launchctl bootout "gui/$(id -u)/$label"; fi
     else systemctl --user stop fronk-node.service; fi
     say "Local node stopped. Choose run to start it again."; exit
+fi
+if [[ $action == --pairing-code ]]; then
+    [[ $installed == head && -s $STATE/cluster.secret ]] || die "the pairing code comes from an installed head"
+    [[ ! -t 1 ]] || die "--pairing-code is only for a pipe, so the code stays off the screen: --pairing-code | ssh NODE 'bash fronk-manager.sh --yes --role node --name NAME --secret-stdin'"
+    burst=$(config_value burst)
+    printf 'fronk-v1:%s:%s\n' "${burst:-1}" "$(cat "$STATE/cluster.secret")"
+    exit
 fi
 if [[ $action == --status ]]; then
     [[ $installed == node ]] || die "status requires an installed node"

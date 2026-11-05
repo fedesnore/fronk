@@ -71,20 +71,53 @@ hash checks, numerical tests, all-node completion or the download demo gate to
 make a setup screen green. Do not change power/thermal protections or delete
 weights to mask a failure.
 
-## Drive the installation over SSH
+## Drive the installation without a terminal
 
-Use the terminal manager with explicit flags. SSH is optional: use it only on hosts
-the person named and already opened or approved, and never ask for passwords or keys.
-Name the computer for each command, and ask before changing a machine.
+Every step below asks nothing. Use it when your commands have no terminal: a question
+then stops with `no terminal is attached` and names what to pass. SSH is optional: use
+it only on hosts the person named and already opened or approved, and never ask for
+passwords or keys. Say which computer each command changes before running it.
 
-- Node install: `ssh -t HOST 'bash fronk-manager.sh --terminal --role node --name NAME'`,
-  so the person types the pairing code into the private prompt. Never read, print or
-  pass the code as an argument.
-- Mac nodes must run as the installed LaunchAgent, not `--no-service` or `nohup` from
-  SSH: a process left behind by a closed SSH session can fail with `EPIPE` or
-  `No route to host` on replies. Ask the person to accept Local Network on that screen.
+```sh
+# Head: installs, measures, creates the pairing secret. Nodes come next.
+bash fronk-manager.sh --yes --role head
+
+# Copy the same manager to each node.
+scp fronk-manager.sh HOST:
+
+# Each node, from the head. The code goes through the pipe: never print or store it.
+~/fronk/bin/fronk-manager --pairing-code |
+  ssh HOST 'bash fronk-manager.sh --yes --role node --name NAME --secret-stdin'
+
+# Head: verify all nodes and run the synthetic demo. Read its report and show it.
+~/fronk/bin/fronk-manager --join-nodes --yes --nodes 'NAME1 NAME2'
+
+# Head: verify the exact weights. Use --download only if the person chose to.
+~/fronk/bin/fronk-manager --configure-model --yes --model /path/to/Qwen3.8-Flash-Next-Q4.gguf
+
+# Head: start in the background; the console proceeds when all 20 units fit.
+nohup ~/fronk/bin/fronk-manager --run > ~/fronk/state/agent-head.log 2>&1 &
+
+# Head: when the model answers, run the numerical and API checks.
+curl -s http://127.0.0.1:7710/v1/models
+python3 ~/fronk/src/tools/api-check.py
+```
+
+- Installing and calibrating can take many minutes. If your tool limits command time,
+  run the step in the background and read its log. Rerunning a step keeps finished work.
+- Non-interactive SSH may not load the person's `PATH`. If a node reports a missing
+  compiler or Python, use `ssh HOST 'zsh -lc "..."'` or ask them to install it.
+- A Mac node needs its user logged in on that Mac, because it runs as a LaunchAgent. If
+  `could not load the LaunchAgent` appears, ask them to log in. Never replace it with
+  `--no-service` or `nohup` over SSH: a process left behind by a closed SSH session can
+  fail with `EPIPE` or `No route to host` on replies.
+- Ask the person to accept Local Network on each Mac node's screen. If the demo reports
+  a missing reply from a Mac, check this first.
+- If the console does not proceed, the plan does not fit. Read `http://127.0.0.1:7730/state`
+  (the port is in the log) and show the person the capacity lines. Do not force it.
 - Runtime traffic uses Fronk's own protocols, so the cluster must not depend on SSH.
-- Return to the head and run Verify after each node, then continue the workflow above.
+
+Finish with a real answer: a build, demo or `/v1/models` response is not a finished chat.
 
 ## Maintenance and recovery
 

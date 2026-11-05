@@ -14,6 +14,9 @@ if [[ ${1:-} == check-peers ]]; then
     cp "$FRONK_CLUSTER_DIR/head.conf" "$prefix/src/fronk.conf"
     "$manager" --prefix "$prefix" --join-nodes --demo-later --yes --nodes 'local-1 local-2' > "$prefix/join.log"
     grep -Fq "All 2 planned nodes authenticated" "$prefix/join.log"
+    # An agent pipes the code to --secret-stdin; it never goes to a terminal.
+    [[ -s $prefix/state/cluster.secret ]] || printf 'fixture\n' > "$prefix/state/cluster.secret"
+    "$manager" --prefix "$prefix" --pairing-code | grep -Eq '^fronk-v1:[1-4]:[^[:space:]]+$'
     if "$manager" --prefix "$prefix" --join-nodes --demo-later --yes --nodes missing > "$prefix/missing.log" 2>&1; then
         echo "An absent node passed verification" >&2; exit 1
     fi
@@ -66,6 +69,13 @@ printf '\n/* kernel fixture */\n' >> "$prefix/src/backends/ref.c"
 [[ $(bench_key) != "$first_key" ]]
 
 grep -Fxq 'name worker-one' "$prefix/src/fronk.conf"
+# Without a terminal a question must explain itself, not stop silently.
+if ! { : </dev/tty; } 2>/dev/null; then
+    if "$manager" --prefix "$prefix" > "$testdir/no-terminal.log" 2>&1 </dev/null; then
+        echo "A question passed without a terminal" >&2; exit 1
+    fi
+    grep -Fq "no terminal is attached" "$testdir/no-terminal.log"
+fi
 [[ ! -e $prefix/src/.cluster && ! -e $prefix/src/tools/cluster.sh && ! -d $prefix/src/ds4 ]]
 "$prefix/bin/fronk" --version | grep -Fq "fronk $(sed -n 's/^VERSION := //p' "$root/Makefile")"
 

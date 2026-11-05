@@ -155,7 +155,7 @@ guide_nodes() {
                 say "Missing or duplicate node names:$missing"
             fi
             say "On the affected node, check its name, pairing secret, running service and network permission. Then retry here."
-            ((yes)) && die "node verification failed"
+            ((yes)) && die "node verification failed for $name. Install and start it, then rerun on the head: --join-nodes --yes --nodes '${roster[*]}'"
         done
     done
     say "All ${#roster[@]} planned nodes authenticated in the same head check."
