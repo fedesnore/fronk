@@ -1,0 +1,10 @@
+# Recorded HW protocol bodies retain their actual CRLF bytes.
+tests/fixtures/hw/*.txt -text whitespace=cr-at-eol
+# Preserve the terminal blank lines emitted by these raw hardware commands.
+tests/fixtures/imac/gpu.txt -text whitespace=-blank-at-eof
+tests/fixtures/shuttle/cpuinfo.txt -text whitespace=-blank-at-eof
+# Preserve recorded CSV line endings and the syntax of upstream patches.
+docs/evidence/*.csv -text whitespace=cr-at-eol
+*.patch -whitespace
+# WebVTT cues end with an intentional blank separator.
+*.vtt whitespace=-blank-at-eof

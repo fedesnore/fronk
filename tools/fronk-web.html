@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>fronk console</title>
+<style>
+/* Same system as the project website: white and mist bands, SF type, one Bondi accent, tangerine for this Mac. */
+:root{
+  --paper:#ffffff; --mist:#f5f5f7; --ink:#1d1d1f; --quiet:#6e6e73; --hair:#d2d2d7; --track:#e8e8ed;
+  --bondi:#0a9ea3; --bondi-soft:rgba(10,158,163,.13); --tang:#e8650a; --tang-soft:rgba(242,107,29,.13);
+  --glass-a:rgba(10,158,163,.9); --glass-b:rgba(130,228,222,.55); --glass-t:rgba(242,107,29,.9); --glass-tb:rgba(255,196,130,.55); --glass-edge:rgba(255,255,255,.8);
+  --warn:#b25000; --bad:#d70015; --navbg:rgba(255,255,255,.8); --card:#ffffff;
+  --display:-apple-system,BlinkMacSystemFont,"SF Pro Display","Helvetica Neue",Helvetica,Arial,sans-serif;
+  --text:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",Helvetica,Arial,sans-serif;
+  --mono:ui-monospace,"SF Mono",Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --paper:#000000; --mist:#0e0e10; --ink:#f5f5f7; --quiet:#a1a1a6; --hair:#3a3a3f; --track:#232326;
+  --bondi:#33d1cb; --bondi-soft:rgba(51,209,203,.16); --tang:#ff8a3d; --tang-soft:rgba(255,138,61,.16);
+  --glass-a:rgba(51,209,203,.85); --glass-b:rgba(51,209,203,.22); --glass-t:rgba(255,138,61,.85); --glass-tb:rgba(255,170,100,.24); --glass-edge:rgba(255,255,255,.35);
+  --warn:#ffb340; --bad:#ff6961; --navbg:rgba(22,22,23,.8); --card:#161618; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --paper:#000000; --mist:#0e0e10; --ink:#f5f5f7; --quiet:#a1a1a6; --hair:#3a3a3f; --track:#232326;
+  --bondi:#33d1cb; --bondi-soft:rgba(51,209,203,.16); --tang:#ff8a3d; --tang-soft:rgba(255,138,61,.16);
+  --glass-a:rgba(51,209,203,.85); --glass-b:rgba(51,209,203,.22); --glass-t:rgba(255,138,61,.85); --glass-tb:rgba(255,170,100,.24); --glass-edge:rgba(255,255,255,.35);
+  --warn:#ffb340; --bad:#ff6961; --navbg:rgba(22,22,23,.8); --card:#161618; color-scheme:dark}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{margin:0;background:var(--paper);color:var(--ink);font:17px/1.47 var(--text);letter-spacing:-.01em;-webkit-font-smoothing:antialiased}
+a{color:var(--bondi);text-decoration:none}
+button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid var(--bondi);outline-offset:3px}
+.in{max-width:1000px;margin:0 auto;padding-inline:16px}
+nav{position:sticky;top:0;z-index:20;background:var(--navbg);border-bottom:1px solid var(--hair);backdrop-filter:saturate(1.8) blur(20px);-webkit-backdrop-filter:saturate(1.8) blur(20px)}
+nav .in{display:flex;align-items:center;gap:22px;height:52px}
+nav .name{font:600 21px/1 var(--display);letter-spacing:-.02em}
+nav .tabs{display:flex;gap:18px}
+nav .tabs button{font:400 13px var(--text);color:var(--quiet);background:none;border:0;padding:6px 0;cursor:pointer}
+nav .tabs button[aria-pressed="true"]{color:var(--ink);font-weight:600}
+nav .live{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--quiet);white-space:nowrap}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--track);flex:none}
+.dot.on{background:var(--bondi);animation:beat 1.6s ease-in-out infinite}
+.dot.wait{background:var(--tang)}
+@keyframes beat{50%{opacity:.3}}
+section{padding-block:clamp(40px,6vw,72px)}
+section.mist{background:var(--mist)}
+h1,h2,h3{font-family:var(--display);margin:0;text-wrap:balance}
+h2{font-size:clamp(32px,4.6vw,48px);line-height:1.06;font-weight:700;letter-spacing:-.03em}
+h3{font-size:21px;line-height:1.2;font-weight:600;letter-spacing:-.015em}
+.eyebrow{font:600 19px/1.2 var(--display);color:var(--bondi);margin:0 0 8px}
+.sub{font:500 clamp(18px,2vw,22px)/1.3 var(--display);color:var(--quiet);margin:14px 0 0;max-width:46ch}
+.label{font:600 12px var(--text);letter-spacing:.06em;text-transform:uppercase;color:var(--quiet)}
+.muted{color:var(--quiet);font-size:14px}
+
+/* phase stepper */
+.stepper{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px;margin-top:32px}
+.stepper div{display:grid;gap:8px;min-width:0}
+.stepper i{height:5px;border-radius:3px;background:var(--track);overflow:hidden;position:relative}
+.stepper .done i{background:color-mix(in srgb,var(--bondi) 45%,var(--track))}
+.stepper .on i{background:var(--bondi-soft)}
+.stepper .on i::after{content:"";position:absolute;inset:0 auto 0 0;width:35%;border-radius:3px;background:var(--bondi);animation:slide 1.8s cubic-bezier(.45,0,.55,1) infinite}
+.stepper .fail i{background:var(--bad)}
+@keyframes slide{from{transform:translateX(-100%)}to{transform:translateX(290%)}}
+.stepper span{font:600 11px var(--text);letter-spacing:.04em;color:var(--quiet);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.stepper .on span{color:var(--bondi)}
+.stepper small{font:400 11px var(--text);color:var(--quiet);font-variant-numeric:tabular-nums}
+
+/* now: what the head is doing, how long, whether that is normal */
+.now{margin-top:28px;background:var(--mist);border-radius:22px;padding:18px 20px;display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:14px;align-items:center}
+.now b{font:600 17px var(--display);display:block}
+.now .muted{font-size:13.5px}
+.now .t{font:700 26px var(--display);font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.now.warn{box-shadow:inset 0 0 0 2px var(--tang)}
+.now.bad{box-shadow:inset 0 0 0 2px var(--bad)}
+.spin{width:22px;height:22px;border-radius:50%;border:3px solid var(--bondi-soft);border-top-color:var(--bondi);animation:turn 1s linear infinite}
+.spin.idle{animation:none;border-top-color:var(--track);border-color:var(--track)}
+.spin.ask{animation:none;border-color:var(--tang)}
+.spin.ok{animation:none;border-color:var(--bondi);background:var(--bondi)}
+.spin.bad{animation:none;border-color:var(--bad);background:var(--bad)}
+@keyframes turn{to{transform:rotate(360deg)}}
+
+/* actions */
+.actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:22px}
+.btn{font:500 15px var(--text);border-radius:999px;padding:10px 20px;cursor:pointer;border:1px solid var(--hair);background:var(--paper);color:var(--ink)}
+.btn.pri{background:var(--bondi);border-color:var(--bondi);color:#fff}
+.btn.ask{background:var(--tang);border-color:var(--tang);color:#fff}
+.btn:disabled{opacity:.35;cursor:default}
+.field{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--quiet)}
+.field input{width:64px}
+input,textarea{font:inherit;font-size:15px;padding:9px 12px;border:1px solid var(--hair);border-radius:12px;background:var(--paper);color:var(--ink);width:100%}
+.note{font-size:14px;color:var(--quiet);margin-top:12px;min-height:1.4em}
+.note.err{color:var(--bad)}
+
+/* cluster */
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(280px,100%),1fr));gap:16px;margin-top:24px}
+.card{background:var(--card);border-radius:24px;padding:20px;display:grid;gap:10px;align-content:start;min-width:0}
+section:not(.mist) .card{background:var(--mist)}
+.card h3{font-size:18px;display:flex;align-items:center;gap:8px;overflow:hidden}
+.card h3 span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sw{width:12px;height:12px;border-radius:4px;flex:none}
+.pill{font:600 11px var(--text);padding:3px 9px;border-radius:999px;background:var(--bondi-soft);color:var(--bondi);white-space:nowrap}
+.pill.t{background:var(--tang-soft);color:var(--tang)}
+.pill.q{background:var(--track);color:var(--quiet)}
+.kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 14px;font-size:13.5px}
+.kv dt{color:var(--quiet)}.kv dd{margin:0;overflow:hidden;text-overflow:ellipsis}
+.bar{height:8px;border-radius:4px;background:var(--track);overflow:hidden;display:flex}
+.bar i{display:block;height:100%}
+
+/* units */
+.tiles{display:grid;grid-template-columns:repeat(20,minmax(0,1fr));gap:5px;margin-top:24px}
+.tiles i{aspect-ratio:3/4;border-radius:6px;background:var(--track);display:grid;place-items:center;font:600 10px var(--text);color:#fff;font-style:normal;box-shadow:inset 0 1px 0 var(--glass-edge)}
+.tiles i.sending{animation:beat 1s ease-in-out infinite}
+@media (max-width:640px){.tiles{grid-template-columns:repeat(10,minmax(0,1fr))}}
+.legend{display:flex;gap:16px;flex-wrap:wrap;margin-top:14px;font-size:13px;color:var(--quiet)}
+.legend span{display:flex;align-items:center;gap:6px}
+
+/* report */
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(150px,100%),1fr));gap:12px;margin-top:24px}
+.kpis div{background:var(--mist);border-radius:18px;padding:14px 16px}
+.mist .kpis div{background:var(--card)}
+.kpis b{display:block;font:700 30px var(--display);letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.kpis span{font-size:12.5px;color:var(--quiet)}
+.rows{display:grid;gap:10px;margin-top:20px}
+.row{display:grid;grid-template-columns:minmax(0,160px) minmax(0,1fr) 70px;gap:12px;align-items:center;font-size:13.5px}
+.row span:last-child{text-align:right;font-variant-numeric:tabular-nums}
+.stream{background:var(--mist);border-radius:18px;padding:16px;font-size:15px;white-space:pre-wrap;min-height:90px;margin-top:16px}
+.caret{display:inline-block;width:7px;height:15px;background:var(--bondi);vertical-align:-2px;animation:blink 1s steps(2) infinite}
+@keyframes blink{50%{opacity:0}}
+
+/* raw output */
+.term{background:#0f1213;border-radius:18px;overflow:hidden;margin-top:20px}
+.term .bar3{display:flex;gap:7px;align-items:center;padding:11px 14px;background:#1b1f20;color:#8b9597;font:500 12px var(--text)}
+.term .bar3 i{width:11px;height:11px;border-radius:50%;background:#3a4042}
+.term .bar3 span{margin-left:10px}
+.term pre{margin:0;padding:14px 16px;height:360px;overflow:auto;color:#cfe9e4;font:12px/1.55 var(--mono);white-space:pre-wrap;word-break:break-word}
+details summary{cursor:pointer;color:var(--bondi);font-size:15px}
+
+/* guide */
+.guide h3{margin-top:28px}
+.guide pre{background:var(--mist);border-radius:14px;padding:12px 14px;font:13px/1.5 var(--mono);overflow:auto}
+.guide table{border-collapse:collapse;font-size:14px;width:100%}
+.guide td{border-top:1px solid var(--hair);padding:8px 10px 8px 0;vertical-align:top}
+.guide p,.guide li{color:var(--quiet)}
+.settings{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(260px,100%),1fr));gap:14px;margin-top:18px}
+.settings label{font-size:13px;color:var(--quiet);display:grid;gap:6px}
+@media (prefers-reduced-motion:reduce){.dot.on,.stepper .on i::after,.spin,.tiles i.sending,.caret{animation:none}}
+@media (max-width:640px){.stepper span{font-size:9.5px}.now{grid-template-columns:auto minmax(0,1fr)}.now .t{grid-column:2}.row{grid-template-columns:minmax(0,100px) minmax(0,1fr) 60px}}
+</style>
+</head>
+<body>
+<nav><div class="in">
+  <span class="name">fronk</span>
+  <div class="tabs" role="tablist">
+    <button data-v="run" aria-pressed="true">Run</button><button data-v="chat" aria-pressed="false">Chat</button><button data-v="guide" aria-pressed="false">Guide</button>
+  </div>
+  <span class="live"><i class="dot" id="dot"></i><span id="livetext">head stopped</span></span>
+</div></nav>
+
+<main id="run" class="v">
+<section><div class="in">
+  <p class="eyebrow" id="eyebrow">Ready</p>
+  <h2 id="headline">Start the cluster.</h2>
+  <p class="sub" id="sub">Choose how many expert blocks this Mac holds, then Start head: it %NODE_START%.</p>
+  <div class="stepper" id="steps"></div>
+  <div class="now" id="now">
+    <i class="spin idle" id="spin"></i>
+    <div><b id="nowtitle">Nothing running</b><span class="muted" id="nowsub">The head is stopped.</span></div>
+    <span class="t" id="nowtime"></span>
+  </div>
+  <div class="actions">
+    <button %NODE_CONTROLS% class="btn" id="n-start">Start nodes</button>
+    <button %NODE_CONTROLS% class="btn" id="n-status">Node status</button>
+    <button %NODE_CONTROLS% class="btn" id="n-stop">Stop nodes</button>
+    <span class="field">Blocks on this Mac <input id="head-blocks" value="%head-blocks%" inputmode="numeric" aria-label="Blocks on this Mac"></span>
+    <button class="btn pri" id="start">Start head</button>
+    <label class="field"><input id="auto" type="checkbox" style="width:auto" checked> proceed when the plan fits</label>
+    <label class="field"><input id="refresh" type="checkbox" style="width:auto"> measure again</label>
+  </div>
+  <div class="actions" id="answers">
+    <button class="btn ask" id="k-p" hidden>Proceed with this plan</button>
+    <button class="btn" id="k-m" hidden>Modified: run CONNECTION again</button>
+    <button class="btn" id="k-r" hidden>Run the test again</button>
+    <button class="btn" id="k-q" hidden>Quit the head</button>
+    <button class="btn" id="stop" hidden>Stop head</button>
+  </div>
+  <p class="note" id="note"></p>
+  <p class="note" id="helpline" hidden>Stuck? <a href="#" id="copyhelp">Copy a request for a frontier model</a> · <a href="#" id="gohelp">How to get help</a></p>
+</div></section>
+
+<section class="mist"><div class="in">
+  <p class="label">Cluster</p>
+  <h3 id="clustertitle" style="margin-top:6px">Nodes appear here as CONNECTION finds them.</h3>
+  <div class="grid" id="nodes"></div>
+</div></section>
+
+<section><div class="in">
+  <p class="label">Expert units</p>
+  <h3 style="margin-top:6px" id="unitstitle">20 units of 32 neurons, 3.35 GB each.</h3>
+  <div class="tiles" id="tiles"></div>
+  <div class="legend" id="legend"></div>
+</div></section>
+
+<section class="mist"><div class="in">
+  <p class="label">Report</p>
+  <h3 style="margin-top:6px" id="reporttitle">Appears after the test generation.</h3>
+  <div class="kpis" id="kpis"></div>
+  <div class="rows" id="rows"></div>
+  <p class="muted" id="mtp" hidden></p>
+  <div class="stream" id="text" hidden></div>
+  <p><a class="btn" href="/api/cluster-report" download="fronk-cluster-result.md">Save cluster report</a></p>
+  <p class="note">A small file to review and share in a GitHub Cluster result issue. No hostnames, addresses, pairing codes or chat text; nothing is uploaded.</p>
+</div></section>
+
+<section><div class="in">
+  <details><summary>Raw head output</summary>
+    <div class="term"><div class="bar3"><i></i><i></i><i></i><span>./fronk head</span></div><pre id="log"></pre></div>
+  </details>
+</div></section>
+</main>
+
+<main id="chat" class="v" hidden>
+<section><div class="in">
+  <p class="eyebrow">Chat</p>
+  <h2>Ask the cluster.</h2>
+  <p class="sub" id="chatsub">Every layer's experts run on the nodes. Start the head first and wait for REPORT.</p>
+  <p><a class="btn pri" href="/chat">Open the chat</a></p>
+  <p class="muted">Past chats on the left, photos and documents with the clip, the model's thinking and the context in use under the conversation.</p>
+</div></section>
+</main>
+
+<main id="guide" class="v" hidden>
+<section><div class="in guide">
+  <p class="eyebrow">Guide</p>
+  <h2>Run it from a terminal, too.</h2>
+  <h3>Settings</h3>
+  <div class="settings">
+    <label>Cluster secret (kept in memory)<input id="secret" type="password" placeholder="%SECRET_HINT%"></label>
+    <label>Model (Q4 GGUF)<input id="model" value="%model%"></label>
+    <label>Burst (2 with MTP)<input id="burst" value="%burst%"></label>
+    <label>ds4 launcher<input id="ds4" value="%ds4%"></label>
+    <label>Interfaces<input id="interfaces" value="%interfaces%"></label>
+  </div>
+  <div class="actions"><button class="btn pri" id="save">Save to fronk.conf</button></div>
+  %WIKI%
+</div></section>
+</main>
+
+<script>
+const T="%TOKEN%";let n=0,view=null,localT0=Date.now();
+const $=id=>document.getElementById(id);
+const esc=t=>String(t??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const mmss=t=>{t=Math.max(0,Math.round(t));return t>=3600?Math.floor(t/3600)+'h '+String(Math.floor(t%3600/60)).padStart(2,'0')+'m':Math.floor(t/60)+':'+String(t%60).padStart(2,'0')};
+document.querySelectorAll('nav .tabs button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('nav .tabs button').forEach(x=>x.setAttribute('aria-pressed',x===b));
+  document.querySelectorAll('.v').forEach(v=>v.hidden=v.id!==b.dataset.v);});
+async function post(p,body){
+  try{const r=await fetch(p,{method:'POST',headers:{'X-Fronk-Token':T,'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const j=await r.json();note(j.message||'',/first|cannot|must|not |wait/.test(j.message||''));return j;}
+  catch(e){note('The console is not reachable: is tools/fronk-web.py still running?',true);return {};}}
+function note(t,err){const e=$('note');e.textContent=t;e.classList.toggle('err',!!err);}
+let helpText='';
+$('copyhelp').onclick=e=>{e.preventDefault();navigator.clipboard.writeText(helpText).then(
+  ()=>note('Request copied. Check it for private names, then paste it into your frontier model.'),()=>note(helpText));};
+$('gohelp').onclick=e=>{e.preventDefault();document.querySelector('nav .tabs button[data-v="guide"]').click();$('help').scrollIntoView();};
+$('n-start').onclick=()=>post('/nodes',{action:'start'});
+$('auto').onchange=()=>post('/auto',{on:$('auto').checked});
+$('n-status').onclick=()=>post('/nodes',{action:'status'});
+$('n-stop').onclick=()=>post('/nodes',{action:'stop'});
+$('start').onclick=()=>post('/start',{refresh:$('refresh').checked,head_blocks:$('head-blocks').value.trim()});
+for(const k of 'pmrq')$('k-'+k).onclick=()=>post('/key',{key:k});
+$('stop').onclick=()=>{if(confirm('Stop the head now? ds4 stops too; the nodes keep running.'))post('/stop',{});};
+$('save').onclick=()=>{const b={};for(const k of ['model','burst','ds4','interfaces'])b[k]=$(k).value.trim();const s=$('secret').value;if(s)b.secret=s;post('/settings',b);};
+
+const PH=["CONNECTION","DISCOVERY","PLAN","FRONK","SELFTEST","TEST","REPORT"];
+const NAMES={CONNECTION:"Connect",DISCOVERY:"Measure",PLAN:"Plan",FRONK:"Load",SELFTEST:"Check",TEST:"Test",REPORT:"Report"};
+const STORY={
+ IDLE:["Ready","Start the cluster.","Choose how many expert blocks this Mac holds, then Start head: it %NODE_START%."],
+ START:["Starting","Waking the head.","Checking the model's unit manifest and loading ds4's dense weights on this Mac."],
+ CONNECTION:["Step 1 of 7 · Connect","Finding the nodes.","Every interface is probed; each node is authenticated and its links are timed, 1,000 round trips per path."],
+ DISCOVERY:["Step 2 of 7 · Profiles","Reading each machine’s saved calibration.","Installation saves compute and RAM + SSD timings. Reconnection reuses compatible profiles and checks current memory and network paths."],
+ PLAN:["Step 3 of 7 · Plan","Your turn: check the plan.","The 20 units are split by measured speed and memory. Proceed, or run CONNECTION again after changing a cable or a machine."],
+ FRONK:["Step 4 of 7 · Load","Loading the units.","Only missing units are sent; every node checks SHA-256 before loading them into memory."],
+ SELFTEST:["Step 5 of 7 · Check","Checking the arithmetic.","One full expert pass on the cluster is compared with a scalar reference read straight from the model file."],
+ TEST:["Step 6 of 7 · Test","Generating a test answer.","ds4 writes 64 tokens; every layer's experts run on the cluster."],
+ REPORT:["Step 7 of 7 · Report","Measured.","Tokens per second, barrier times and each node's compute and network time."]};
+const COLORS=["var(--bondi)","#5e5ce6","#30a46c","#bf5af2","#64d2ff","#8e8e93"];const colour={};
+function col(name){if(name==="head")return "var(--tang)";if(name==="head-ssd")return "var(--quiet)";
+  if(!(name in colour))colour[name]=COLORS[Object.keys(colour).length%COLORS.length];return colour[name];}
+const shortName=n=>n==="head"?"this Mac":n;
+
+// Raw lines -> what a person reads, and how long that step usually takes.
+function explain(a){
+  let m;
+  if(!a)return ["Working","",0];
+  if((m=a.match(/^BENCH waiting node=(\S+) (\d+) s/)))return [`${m[1]} is still measuring its backends`,"A node's first sweep after a new binary takes about 3–7 minutes. The head checks on it every 15 s.",480];
+  if((m=a.match(/^BENCH node=(\S+) done ([\d.]+) s/)))return [`${m[1]} finished measuring (${(+m[2]).toFixed(0)} s)`,"Waiting for the other machines.",480];
+  if((m=a.match(/^BENCH node=(\S+) sweep/)))return [`Asking ${m[1]} for its measurements`,"Saved results come back in seconds; a new binary takes minutes.",480];
+  if((m=a.match(/^BENCH cached backend=(\S+) blocks=(\d+)/)))return [`This Mac: reusing the saved ${m[1]} measurement at ${m[2]} blocks`,"",60];
+  if((m=a.match(/^BENCH backend=(\S+) blocks=(\d+) done ([\d.]+) s/)))return [`This Mac: ${m[1]} at ${m[2]} blocks measured in ${(+m[3]).toFixed(0)} s`,"Next measurement starting.",240];
+  if((m=a.match(/^BENCH backend=(\S+) blocks=(\d+) .*samples=(\d+)(?:.*loads ([\d.]+) GB)?/)))return [`This Mac: measuring ${m[1]} with ${m[2]} block${m[2]==='1'?'':'s'}`,
+    `${m[4]?'Loads '+(+m[4]).toFixed(1)+' GB next to ds4, then ':''}${+m[3]>1000?'10,000 timed calls (about 1–4 min)':'a short probe (under a minute)'}.`,+m[3]>1000?300:120];
+  if(/^SERVE waiting for ds4 to load/.test(a))return ["Loading ds4's dense weights","About 20–60 s on this Mac.",120];
+  if(/^SERVE waiting for ds4-server/.test(a))return ["Waiting for ds4 to answer","",120];
+  if(/^SERVE Vulkan head started/.test(a))return ["Loading dense weights on the GPU","",120];
+  if(/^SERVE ds4 started/.test(a))return ["ds4 started","",120];
+  if(/^TIMING CONNECTION/.test(a))return ["Links measured","Asking every node for its hardware.",60];
+  if(/^DISCOVERY complete/.test(a))return ["Hardware read","Collecting the measurements.",60];
+  if(/^TIMING DISCOVERY/.test(a))return ["Measurements complete","Computing the plan.",30];
+  if((m=a.match(/^FRONK (.+): (\d+) units ready in ([\d.]+) s/)))return [`${m[1]==='this Mac'?'This Mac':m[1]} has its ${m[2]} units loaded (${(+m[3]).toFixed(0)} s)`,"Waiting for the other machines. A node that kept its units from the last run is ready at once.",120];
+  if(/^TIMING FRONK/.test(a))return ["All units loaded","Warming every layer on every machine, then the selftest.",90];
+  if(/^SELFTEST retry/.test(a))return [a.replace(/^SELFTEST /,'Selftest '),"Trying again; a machine that never answers is named here.",30];
+  if(/^TIMING SELFTEST/.test(a))return ["Selftest passed","Starting the test generation.",60];
+  if((m=a.match(/^TIMING READY ([\d.]+)/)))return [`Ready ${(+m[1]).toFixed(0)} s after start`,"",0];
+  if(/^BENCH node=.* done/.test(a)===false&&/^BENCH \S+ measured up to/.test(a))return [a.replace(/^BENCH /,'This Mac: '),"",60];
+  if(/^FRONK sent/.test(a))return [a.replace(/^FRONK /,''),"",300];
+  if(/^FRONK cache/.test(a))return ["All units in place and verified","Starting the sessions.",120];
+  if(/^CONFIGURATION/.test(a))return ["Configuring each machine's backend","Sending missing units next.",300];
+  if(/^SELFTEST/.test(a))return ["Selftest finished","",60];
+  if(/^TEST pass/.test(a))return ["Generating the test answer","64 tokens through the cluster.",90];
+  if(/^REPORT/.test(a))return ["Report ready","",30];
+  if(/^fronk:/.test(a))return [a.replace(/^fronk: /,''),"",0];
+  return [a,"",120];}
+
+function draw(v){
+  view=v;
+  const mtp=v.mtp||{};
+  $('mtp').hidden=!mtp.width;
+  if(mtp.width){
+    const hit=mtp.cycles?Math.round(100*mtp.sibling_hits/mtp.cycles)+'%':'—';
+    const next=mtp.cycles?Math.round(100*mtp.continuation_hits/mtp.cycles)+'%':'—';
+    $('mtp').textContent=`Experimental MTP interleaving · up to ${mtp.width} branches · ${mtp.active??mtp.width} active · sibling acceptance ${hit} · continuation acceptance ${next} · ${mtp.overlapped_calls||0} expert calls overlapped with dense work this session`;
+  }
+  const failed=v.waiting==='failed'||(v.keys==='mq');
+  const exited=!v.running&&v.phase!=='IDLE';
+  const stuck=failed||(exited&&!/status 0/.test(v.lastline||''));$('helpline').hidden=!stuck;
+  if(stuck)helpText=`Read docs/llm/DEBUG.md. Fronk stopped at ${NAMES[v.phase]||v.phase} on the head with this error: "${v.failure||v.lastline||'[paste it from the raw output]'}". Help me find the cause, one check at a time, and tell me which computer to use. Keep my configuration and verified weights.`;
+  const at=v.waiting==='after'?PH.length:PH.indexOf(v.phase);
+  // headline
+  let st=STORY[v.phase]||STORY.IDLE;
+  if(v.waiting==='after')st=["Ready"+(v.timing.READY?" in "+mmss(+v.timing.READY):"")+" · "+(v.report.toks?v.report.toks+" tok/s":"report"),"The cluster is answering.","Open Chat to talk to the model. Run the test again for fresh numbers, or Quit to stop the head and ds4."];
+  if(failed)st=["Stopped at "+(NAMES[v.phase]||v.phase),"This cycle failed.","The reason is below. Fix it, then run CONNECTION again, or quit."];
+  if(exited&&!failed)st=["Stopped","The head is not running.",v.lastline&&/exited with status 0/.test(v.lastline)?"It quit normally. Start it again when you are ready.":"It exited. The last lines of the raw output say why."];
+  $('eyebrow').textContent=st[0];$('headline').textContent=st[1];$('sub').textContent=st[2];
+  // stepper with per-phase times
+  $('steps').innerHTML=PH.map((p,i)=>{const cls=i<at?'done':i===at?(failed?'fail':v.running?'on':''):'';
+    const t=p==='CONNECTION'&&v.timing.CONNECTION?(+v.timing.CONNECTION).toFixed(0)+' s':p==='DISCOVERY'&&v.timing.DISCOVERY?(+v.timing.DISCOVERY).toFixed(0)+' s':i===at&&v.running&&!v.keys?mmss(v.phase_age||0):'';
+    return `<div class="${cls}"><i></i><span>${NAMES[p]}</span><small>${t||'&nbsp;'}</small></div>`}).join('');
+  if(v.demo){
+    $('eyebrow').textContent='Head · '+v.head_name+' · Installer demo';
+    $('headline').textContent='Measuring the cluster before loading weights';
+    $('sub').textContent='This run uses synthetic weights on the participating machines.';
+  }else if(v.observer){
+    $('eyebrow').textContent='Head · '+v.head_name+' · Terminal monitor';
+    $('sub').textContent=v.running?'Follow the live run here. Use the terminal on '+v.head_name+' for commands.':'This terminal run has ended. Its measured results are shown below.';
+  }
+  // now panel
+  const nowEl=$('now'),spin=$('spin');nowEl.classList.remove('warn','bad');
+  let title,subt,time='';
+  if(!v.running&&v.phase==='IDLE'){spin.className='spin idle';title='Nothing running';subt='The head is stopped.';}
+  else if(!v.running){spin.className='spin '+(failed||!/status 0/.test(v.lastline||'')?'bad':'idle');title='Head stopped';subt=esc(v.lastline||'');}
+  else if(v.keys){spin.className='spin ask';title=failed?'Waiting for you: run CONNECTION again or quit':v.keys.includes('p')?'Waiting for you: proceed with this plan?':'Waiting for you';
+    subt=failed?esc(v.failure||'See the raw output.'):v.keys.includes('p')?'Check the units below, then Proceed.':'Chat is open.';if(failed)nowEl.classList.add('bad');}
+  else{spin.className='spin';const [a,b,limit]=explain(v.activity);title=esc(a);subt=esc(b);time=mmss(v.activity_age);
+    const quiet=v.activity_age;
+    if(limit&&quiet>limit){nowEl.classList.add('warn');subt=`No news for ${mmss(quiet)}, longer than this step usually takes. The head process is alive; if it stays like this for several more minutes, Quit and look at the raw output.`;}}
+  const genProgress=v.generation_progress;
+  if(v.phase==='TEST'&&v.running&&genProgress&&genProgress.phase==='prefill'){
+    title='Reading the test prompt';subt=esc(genProgress.read+' / '+genProgress.new+' tokens'+(genProgress.rate?' · '+genProgress.rate+' tok/s':''));
+  }
+  $('nowtitle').innerHTML=title;$('nowsub').innerHTML=subt;$('nowtime').textContent=time;
+  // live indicator
+  $('dot').className='dot '+(v.running?(v.keys?'wait':'on'):'');
+  $('livetext').textContent=v.running?(v.keys?'waiting for you':'head running · '+mmss(v.elapsed)):'head stopped';
+  // buttons: only what the head can take now
+  for(const k of 'pmrq')$('k-'+k).hidden=!v.keys.includes(k);
+  $('stop').hidden=v.observer||!v.running||v.keys.includes('q');
+  for(const id of ['n-start','n-stop','start'])$(id).disabled=v.running||v.observer;
+  if(document.activeElement!==$('auto'))$('auto').checked=v.auto!==false;
+  $('head-blocks').disabled=v.running||v.observer;
+  // nodes
+  const names=Object.keys(v.nodes).filter(x=>x!=='head-ssd'&&(x==='head'||v.nodes[x].link||v.nodes[x].blocks!==undefined));
+  if(v.nodes.head||names.length)$('clustertitle').textContent=`${names.filter(x=>x!=='head').length} node${names.filter(x=>x!=='head').length===1?'':'s'} and head ${v.head_name||'on this Mac'}.`;
+  const maxA=Math.max(1,...names.map(x=>+(v.nodes[x].report||{}).arrival||0));
+  $('nodes').innerHTML=names.sort((a,b)=>(a==='head')-(b==='head')).map(x=>{const d=v.nodes[x],r=d.report;
+    const gb=d.mem_total_bytes?(d.mem_total_bytes/1e9).toFixed(0)+' GB':'';
+    const link=x==='head'?'<span class="pill t">this Mac</span>':d.link?`<span class="pill">${esc(d.link)}</span>`:'<span class="pill q">pending</span>';
+    const bench=d.bench==='sweeping'&&v.phase==='DISCOVERY'?'<span class="pill q">measuring</span>':'';
+    return `<div class="card"><h3><i class="sw" style="background:${col(x)}"></i><span>${esc(shortName(x))}</span>${link}${bench}</h3>
+     <dl class="kv">${x==='head'&&v.dense?`<dt>dense engine</dt><dd>${esc(v.dense.split(';')[0])}</dd>`:''}${x!=='head'?`<dt>address</dt><dd>${esc(d.address||'–')} via ${esc(d.iface||'?')}${d.rtt?' · '+(d.rtt/1000).toFixed(2)+' ms':''}</dd>`:''}
+     ${d.cpu_model?`<dt>hardware</dt><dd>${esc(d.cpu_model)} · ${esc(d.cores||'?')} cores · ${gb}</dd>`:''}
+     ${d.blocks!==undefined?`<dt>units</dt><dd>${d.blocks} of ${d.cap} possible · ${d.gb} GB · ${esc(d.backend)}</dd>`:''}
+     ${d.hybrid?`<dt>placement</dt><dd>${esc(d.hybrid.RAM)} RAM + ${esc(d.hybrid.SSD)} SSD · ${esc(d.hybrid.cache)} MiB cache</dd><dt>saved calibration</dt><dd>burst ${esc(d.hybrid.burst)} · cold compute + I/O ${(+(d.hybrid['compute+cold_io'])/1000).toFixed(2)} ms · warm ${(+(d.hybrid.warm)/1000).toFixed(2)} ms · reply estimate ${(+(d.hybrid.predicted_reply)/1000).toFixed(2)} ms</dd>`:''}
+     ${r?`<dt>per layer</dt><dd>compute ${(+r.compute/1000).toFixed(2)} ms · ${x==='head'?'local wait '+(+(r.local_wait_us||0)/1000).toFixed(2):'network '+(+r.network/1000).toFixed(2)} ms${+r.misses?' · <b style="color:var(--bad)">'+r.misses+' misses</b>':''}</dd>`:''}</dl>
+     ${r?`<div class="bar" title="compute, then network"><i style="width:${100*r.compute/maxA}%;background:${col(x)}"></i><i style="width:${100*r.network/maxA}%;background:${col(x)};opacity:.35"></i></div>`:''}</div>`}).join('');
+  // units
+  const owners=[...new Set(v.owner.filter(Boolean))];
+  $('unitstitle').textContent=v.capacity?v.capacity.replace(/^resident=/,'Resident ').replace(' blocks',' units'):'20 units of 32 neurons, 3.35 GB each.';
+  $('tiles').innerHTML=v.owner.map((o,b)=>{const ok=v.verified.includes(b),sending=v.phase==='FRONK'&&o&&!ok&&v.nodes[o]&&v.nodes[o].cached<v.nodes[o].blocks;
+    return `<i class="${sending?'sending':''}" title="unit ${b}: ${esc(o?shortName(o):'unassigned')}${v.ssd.includes(b)?' · SSD streaming':''}" style="background:${o?col(o):'var(--track)'}">${ok?'✓':b}${v.ssd.includes(b)?'s':''}</i>`}).join('');
+  $('legend').innerHTML=owners.map(o=>`<span><i class="sw" style="background:${col(o)}"></i>${esc(shortName(o))}</span>`).join('')+(v.verified.length?'<span>✓ sent and verified this run</span>':'');
+  // report
+  const r=v.report;
+  if(r.barriers){$('reporttitle').textContent=r.bottleneck?`Slowest: ${shortName(r.bottleneck)}${r.balanced===false?'':' (balanced)'}.`:'Measured.';
+    $('kpis').innerHTML=[[r.toks||'–','tokens/s decode'],[(r.p50/1000).toFixed(2)+' ms','per layer, median'],[(r.p99/1000).toFixed(1)+' ms','per layer, p99'],[r.deadline_misses,'deadline misses']]
+      .map(k=>`<div><b>${esc(k[0])}</b><span>${k[1]}</span></div>`).join('');
+    const rep=names.filter(x=>v.nodes[x].report);
+    $('rows').innerHTML=rep.map(x=>{const d=v.nodes[x].report;return `<div class="row"><span>${esc(shortName(x))}</span><div class="bar"><i style="width:${100*d.compute/maxA}%;background:${col(x)}"></i><i style="width:${100*d.network/maxA}%;background:${col(x)};opacity:.35"></i></div><span>${(d.arrival/1000).toFixed(2)} ms</span></div>`}).join('')+
+      (rep.length?'<p class="muted">Bars: solid is compute, light is network. Each node\'s answer arrives at the right-hand time, every layer.</p>':'');}
+  const gen=v.text.trim();$('text').hidden=!gen&&v.phase!=='TEST';
+  $('text').innerHTML=esc(gen)+(v.phase==='TEST'&&v.running?'<span class="caret"></span>':'');
+  $('chatsub').textContent=v.waiting==='after'?'Every layer\'s experts run on the nodes. The cluster is ready.':'Start the head first and wait for REPORT.';
+}
+
+async function poll(){
+  try{draw(await (await fetch('/state')).json());}catch(e){$('livetext').textContent='console not reachable';}
+  try{const j=await (await fetch('/log?since='+n)).json();if(j.reset)n=0,$('log').textContent='';if(j.lines.length){const l=$('log');
+    const end=l.scrollTop+l.clientHeight>=l.scrollHeight-4;l.textContent+=j.lines.join('\n')+'\n';n=j.next;if(end)l.scrollTop=l.scrollHeight;}}catch(e){}
+  setTimeout(poll,1000);}
+poll();
+</script>
+</body>
+</html>

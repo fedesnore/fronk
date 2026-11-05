@@ -1,0 +1,141 @@
+Milestone 5 numerical contract, version 1
+========================================
+
+This contract is established before Metal/AVX2 implementation. Committed
+tolerances are part of the numerical contract; do not relax them to pass a kernel.
+End-to-end design section 9 thresholds remain a separate requirement.
+
+Interface and layout
+--------------------
+src/backend.h preserves the design's vtable. One request is one layer and
+1..8 tokens; every token supplies ten distinct routed ids, eleven nonnegative
+finite gates (shared expert 512 last), and 2560 finite fp32 activations.
+The data plane will decode fp16 before calling the backend. There is no
+additional fp16 rounding here. Output is fp32, with inactive tokens zeroed.
+
+load borrows a complete immutable 3,404,021,760-byte ownership block until
+unload. The caller must keep the buffer alive and validate its file hash.
+Within it, order is layer, expert, projection (gate/up/down), row, Q4 group.
+Each projection occupies 46,080 bytes. Gate/up are 32x2560; down is 2560x32.
+No requantization or transpose occurs. Calls are externally serialized;
+run has no allocation or I/O and leaves output unchanged on failure.
+No loaded blocks is a state error, not a successful zero partial.
+
+Each Q4_0 group is an unaligned little-endian fp16 scale and 16 packed bytes.
+Byte j's low nibble is weight j; high nibble is weight j+16. Weight=(q-8)*d;
+negative and subnormal scales are valid, nonfinite scales are rejected when
+read (including experts with zero gates). The canonical layout was verified
+against ggml's quantize_row_q4_0_ref/dequantize_row_q4_0:
+https://github.com/ggml-org/ggml/blob/master/src/ggml-quants.c
+Verified on 2026-10-28. This defines a byte decoder, not the milestone 10
+production quantizer.
+
+Oracle arithmetic
+-----------------
+ref decodes weights exactly, multiplies fp32 operands, and accumulates every
+dot in double in column order. Gate/up dots round to fp32. Stable double SiLU
+and multiplication produce an fp32 hidden activation. Each down dot, routing
+multiply and sum across experts/blocks use double; only final output rounds
+to fp32. Order is token, routed expert (request order), shared expert, ascending
+owned block, dimension. Nonfinite inputs/results and fp32 overflow fail.
+FE_TONEAREST is required; no global rounding mode is changed. Ref is permitted
+to read weights token-first; optimized backends must reuse reads across burst.
+
+ref-q8 differs only by quantizing x and each owned 32-neuron hidden slice
+before its dot. Symmetric signed Q8 uses maxabs/127 fp32 scale, 127/maxabs
+fp32 multiplier, nearest-even rounding, clamp [-127,127], then fp32 dequant.
+Input groups have 64 elements; each hidden slice has 32 (zero-padding to 64
+would give the same result). Zero groups stay zero; subnormal groups whose
+scale underflows become zero. Overflowing reciprocal uses x/maxabs*127;
+dequantization is capped at +/-FLT_MAX if rounded scale would overflow.
+This models the preserved Shuttle activation scheme. It does NOT certify
+that archive's custom Q4 weight format as canonical Q4_0: milestone 7 retains
+the explicit compatibility gate. No accelerated code is ported here.
+
+Comparison
+----------
+For EACH token's partial, not an average over a burst or the complete model:
+  relative_l2 = sqrt(sum((actual-ref)^2) / sum(ref^2))
+  normalized_max = max(abs(actual-ref)) / max(abs(ref))
+  cosine = dot(actual,ref) / sqrt(sum(actual^2)*sum(ref^2))
+All reductions use double. All three limits must pass inclusively. For a zero
+reference only an exactly zero candidate passes (metrics 0,0,1); any nonzero
+candidate has metrics infinity,infinity,0. A zero candidate with nonzero
+reference has cosine 0. NaN/Inf always fail. Cosine is clamped to [-1,1] for
+roundoff. Per-coordinate relative error is intentionally not used at zeros.
+
+Frozen limits (src/backend.c), inclusive:
+
+                         relative L2    normalized max    cosine floor
+  ref reproducibility     0.000001       0.000001          0.999999999999
+  backend conformance     0.025          0.030             0.9998
+
+The second row applies to ref-q8 and future accelerated backends. No test may
+rewrite goldens or tune limits automatically. If a later backend cannot pass,
+stop and explain; do not loosen these limits. Unit tests exercise each boundary.
+
+Fixtures, reproducibility and measured Q8 envelope
+------------------------------------------------
+src/vectors.c version-1 recipe constructs canonical Q4 bytes directly, with
+fixed unsigned xorshift32 streams (13,17,5), signed finite fp16 scales, all
+nibble values, subnormal scales, and fixed fp32 activations/gates. It never
+quantizes/requantizes model weights. The entire recipe is version controlled.
+Each .txt header binds name, layer, burst, ownership mask, and a SHA-256 over
+the request and every materialized weight slice. Integers and float bits in
+the digest are explicitly little-endian; compiler struct padding is excluded.
+The rest is token-major 2560-dimensional reference output in exact C99 hex
+float notation. SHA256SUMS additionally binds each complete golden file.
+Missing files, changed recipes, bad hashes, nonfinite/truncated/extra data,
+incorrect output metadata, or nonzero inactive tokens fail self-test.
+
+Fixture        Layer  Burst  Owned blocks   Coverage
+zero-input       0      1    0              exact zero reference
+zero-gates       1      2    19             zero routed AND shared gates
+signed           0      1    0              signed scales, full hidden state
+reused          17      4    7              same experts across different tokens
+mixed           47      8    0,19           distinct routes, layer/block/id edges
+outliers        31      2    19             activation outliers vs small values
+tiny            23      1    11             small nonzero reference norms
+all-blocks       1      1    0..19          complete neuron ownership
+
+All fixtures include the shared expert; ids 0 and 511 are covered. The corpus
+has 20 token partials (51,200 fp32 outputs), 17 nonzero and three exactly zero.
+Sparse anonymous mappings exercise real >2GiB offsets without model downloads
+or multi-GB resident allocations: only the requested layer and expert slices
+are populated. The all-blocks case reserves about 68GB VIRTUAL address space,
+but materializes about 30.4MB of weights. No swap/disk weights are written.
+
+Generate explicitly into a NEW empty directory (existing files are refused):
+  make build/fronk-vectors
+  mkdir build/new-vectors
+  ./build/fronk-vectors generate build/new-vectors
+  ./build/fronk-vectors check ref tests/vectors
+  ./build/fronk-vectors check ref-q8 tests/vectors
+  make test-q4 test-backend test-vectors
+
+Ordinary tests never regenerate or update goldens. Compare regenerated files
+and SHA256SUMS byte-for-byte when auditing reproducibility; do not replace the
+committed corpus implicitly. The sanitizer generator is build/test/fronk-vectors.
+Its initial output and an independent -O2 generation matched byte-for-byte.
+Self-test temporarily loads/unloads fixtures, requires idle backend state,
+and releases fixtures on failure. It can be reused by the future SELFTEST
+control command without running it inside the current control event loop.
+
+Initial Q8 measurements, 2026-10-28, M4 Pro, Apple clang 21, ASan/UBSan:
+  maximum relative L2:      0.0123886178168 (mixed token 2)
+  maximum normalized max:   0.0143968827672 (signed token 0)
+  minimum cosine:          0.999923474904  (mixed token 2)
+Per-token observations are in q8-baseline.txt; all zero references were exact.
+The L2 and maximum-error limits provide respectively 2.018x and 2.084x the
+observed maxima. The cosine deficit budget, 1-0.9998, is 2.614x the observed
+worst deficit. This is a measured synthetic envelope, not evidence of real-model
+accuracy; section 9 validation remains mandatory. Rosetta x86_64 passed the
+same committed corpus/limits, with no architecture-specific tolerance changes.
+
+Independent evidence beyond generated expectations: test_q4 checks all 65,536
+fp16 encodings, nibble basis vectors, group offsets and Q8 nearest-even ties.
+test_backend compares ref to an independently expanded dense-matrix oracle,
+checks analytic SiLU(1), routed/shared gate scaling and block additivity,
+read-only mapped weights, all burst lengths, and bit-identical repeated-expert
+bursts versus individual tokens for BOTH reference variants. Corruption and
+deliberately broken zero-output backends fail the conformance tests.

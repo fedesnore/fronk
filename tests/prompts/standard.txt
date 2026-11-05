@@ -1,0 +1,14 @@
+Write a C function that reverses a singly linked list, with a short test in main.
+Write a Python function that parses an ISO 8601 date without using the datetime module, with three assertions.
+Explain what this C code does and find the bug: int a[4] = {1, 2, 3, 4}; int sum = 0; for (int i = 0; i <= 4; ++i) sum += a[i];
+Write a bash script that finds the ten largest files under a directory.
+Implement binary search in Rust and explain its invariant.
+Scrivi un paragrafo in italiano che spieghi a uno studente di liceo come funziona una rete Ethernet.
+Riassumi in cinque frasi la storia dell'Università di Bologna.
+Traduci in italiano: "The deadline is a trade-off between latency and completeness."
+A train leaves at 14:35 and arrives at 17:10. How long is the trip? Show the steps.
+Prove that the sum of the first n odd numbers is n squared.
+Compare TCP and UDP for a real-time multiplayer game in a short table.
+Explain the difference between memory bandwidth and memory latency, with one example each.
+Return a JSON object with fields name, cores and memory_gb describing a laptop with an 8-core CPU and 16 GB of RAM. Output only JSON.
+Write a haiku about a network switch.

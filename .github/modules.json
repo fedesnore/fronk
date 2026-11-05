@@ -1,0 +1,80 @@
+{
+  "backend": [
+    "backends/*",
+    "src/backend.*",
+    "src/native.*",
+    "src/q4.*",
+    "src/metal.h",
+    "src/neon.h",
+    "src/avx2.h",
+    "tools/backend-module.py"
+  ],
+  "head": [
+    "src/head.*",
+    "src/serve.*",
+    "src/runtime.*",
+    "tools/engine/*",
+    "tools/mtp/*",
+    "tools/gpu-head/*"
+  ],
+  "transport": [
+    "src/wire.*",
+    "src/fanout.*",
+    "src/plane.*",
+    "src/connection.*",
+    "src/control.*",
+    "src/resp.*",
+    "src/net.*",
+    "src/udp.*",
+    "src/auth.*",
+    "src/interfaces.*",
+    "src/node.*",
+    "src/ae.*"
+  ],
+  "planner": [
+    "src/planner.*",
+    "src/selection.*",
+    "src/discovery.*",
+    "src/bench.*",
+    "src/hw.*",
+    "src/hybrid.*",
+    "src/ssd.*",
+    "src/setup.*"
+  ],
+  "model": [
+    "src/model.*",
+    "src/prep.*",
+    "src/units.*",
+    "tools/fronk-model-check.c",
+    "tools/install/model*",
+    "tools/install/verify-model.py"
+  ],
+  "installer": [
+    "tools/install/*",
+    "configs/*",
+    "src/config.*",
+    "src/main.c"
+  ],
+  "console": [
+    "tools/fronk-web*",
+    "tools/fronk-chat*",
+    "tools/fronk_files.py",
+    "tools/native/*",
+    "tools/fronk_report.py"
+  ],
+  "docs": [
+    "*.md",
+    "docs/*"
+  ],
+  "tests": [
+    "tests/*",
+    "tools/check-docs.py",
+    "tools/api-check.py"
+  ],
+  "build": [
+    "Makefile",
+    ".github/*",
+    ".gitignore",
+    "tools/release/*", "tools/pr-scope.py"
+  ]
+}

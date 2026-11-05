@@ -1,0 +1,21 @@
+# Generated executables, local runs and large model assets stay out of Git.
+/fronk
+/fronk-cli
+/fronk-prep
+/build/
+/runs/
+/weights/
+*.dSYM/
+.DS_Store
+
+/fronk-profile.txt
+/.cluster/
+__pycache__/
+*.pyc
+/fronk-extract
+
+# The manager creates these locally; publish examples from configs/ instead.
+/fronk.conf
+/SOURCE-SHA256SUMS
+/release/
+*.gguf

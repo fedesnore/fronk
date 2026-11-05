@@ -1,0 +1,6 @@
+hw.machine: x86_64
+hw.memsize: 51539607552
+hw.physicalcpu: 4
+hw.logicalcpu: 4
+hw.cpufrequency_max: 3800000000
+machdep.cpu.brand_string: Intel(R) Core(TM) i5-7600K CPU @ 3.80GHz

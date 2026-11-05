@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>fronk</title>
+<style>
+/* The chat page of fronk: past chats on the left, one conversation in the
+ * middle, one quiet status line under it. Same tokens as the console. */
+:root{
+  --paper:#ffffff; --mist:#f5f5f7; --ink:#1d1d1f; --quiet:#6e6e73; --hair:#d2d2d7; --track:#e8e8ed;
+  --bondi:#0a9ea3; --tang:#e8650a; --bad:#d70015; --side:#f5f5f7;
+  --text:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",Helvetica,Arial,sans-serif;
+  --mono:ui-monospace,"SF Mono",Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --paper:#000000; --mist:#161618; --ink:#f5f5f7; --quiet:#a1a1a6; --hair:#3a3a3f; --track:#232326;
+  --bondi:#33d1cb; --tang:#ff8a3d; --bad:#ff6961; --side:#0e0e10; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --paper:#000000; --mist:#161618; --ink:#f5f5f7; --quiet:#a1a1a6; --hair:#3a3a3f; --track:#232326;
+  --bondi:#33d1cb; --tang:#ff8a3d; --bad:#ff6961; --side:#0e0e10; color-scheme:dark}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{height:100%}
+body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.45 var(--text);-webkit-font-smoothing:antialiased;display:grid;grid-template-columns:268px minmax(0,1fr);overflow:hidden}
+button{font:inherit;color:inherit;cursor:pointer}
+button:focus-visible,input:focus-visible{outline:2px solid var(--bondi);outline-offset:2px}
+aside{background:var(--side);border-right:1px solid var(--hair);display:flex;flex-direction:column;min-height:0}
+.brand{display:flex;align-items:center;justify-content:space-between;padding:16px 14px 8px 18px}
+.brand b{font-size:17px;letter-spacing:-.02em}
+.brand a{color:var(--quiet);font-size:12.5px;text-decoration:none}
+.new{margin:6px 12px 10px;padding:9px 12px;border-radius:10px;border:1px solid var(--hair);background:var(--paper);text-align:left;font-weight:500}
+.new:hover{border-color:var(--quiet)}
+#q{margin:0 12px 6px;padding:8px 11px;border-radius:10px;border:1px solid var(--hair);background:var(--paper);color:var(--ink);font:inherit;font-size:13.5px}
+#list{overflow:auto;padding:0 8px 16px;flex:1}
+.hit{display:block;border-radius:8px;padding:8px 10px;cursor:pointer}
+.hit:hover{background:var(--track)}
+.hit b{display:block;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hit small{display:block;color:var(--quiet);font-size:12.5px;line-height:1.35;margin-top:2px}
+.hit mark{background:none;color:var(--bondi);font-weight:600}
+.hit .use{float:right;border:1px solid var(--hair);background:var(--paper);border-radius:6px;font-size:11.5px;padding:1px 7px;margin-left:6px;color:var(--quiet)}
+#list h4{margin:14px 10px 4px;font-size:11.5px;font-weight:600;color:var(--quiet);text-transform:uppercase;letter-spacing:.04em}
+.item{display:flex;align-items:center;gap:6px;border-radius:8px;padding:7px 10px;color:var(--ink)}
+.item span{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.item:hover,.item.on{background:var(--track)}
+.item button{border:0;background:none;color:var(--quiet);padding:0 2px;visibility:hidden;font-size:15px;line-height:1}
+.item:hover button{visibility:visible}
+main{display:flex;flex-direction:column;min-width:0;min-height:0}
+header{display:flex;align-items:center;gap:12px;padding:12px 20px;border-bottom:1px solid var(--hair)}
+header h1{margin:0;font-size:15px;font-weight:600;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#menu{display:none;border:0;background:none;font-size:18px;padding:0 4px}
+.pill{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--quiet);text-decoration:none;white-space:nowrap}
+.pill i{width:8px;height:8px;border-radius:50%;background:var(--quiet)}
+.pill.ok i{background:#30c48d}.pill.wait i{background:var(--tang)}
+.opts{position:relative}
+.opts>button{border:1px solid var(--hair);background:var(--paper);border-radius:8px;padding:4px 9px;font-size:12.5px;color:var(--quiet)}
+#opts{position:absolute;right:0;top:32px;z-index:5;background:var(--paper);border:1px solid var(--hair);border-radius:12px;padding:10px 12px;box-shadow:0 8px 30px rgba(0,0,0,.12);display:grid;gap:8px;width:310px;font-size:13.5px}
+.opts label{display:flex;gap:8px;align-items:flex-start}
+.ctxpick{display:grid;gap:6px;border-top:1px solid var(--hair);padding-top:8px}
+.ctxpick select{font:inherit;padding:5px 6px;border-radius:8px;border:1px solid var(--hair);background:var(--paper);color:var(--ink)}
+.ctxpick small{color:var(--quiet);font-size:12px;line-height:1.4}
+.ctxpick button{border:1px solid var(--bondi);background:var(--bondi);color:#fff;border-radius:8px;padding:5px 8px;font-size:12.5px}
+.stage{flex:1;min-height:0;display:flex;flex-direction:column;align-items:center;padding:0 16px}
+deep-chat{display:block;width:100%;max-width:820px;flex:1;min-height:0}
+.status{width:100%;max-width:820px;padding:6px 6px 12px;font-size:12.5px;color:var(--quiet);font-variant-numeric:tabular-nums}
+.status .line{display:flex;align-items:center;gap:10px;cursor:pointer;min-height:18px}
+.status .line span{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.status .line b{color:var(--ink);font-weight:600}
+.mini{width:90px;height:4px;border-radius:2px;background:var(--track);overflow:hidden;display:flex;flex:none}
+.mini i,.bar i{display:block;height:100%}
+.r{background:var(--hair)}.p{background:var(--bondi)}.t{background:var(--tang)}.a{background:var(--ink)}.f{background:#8e7cc3}
+.more{margin-top:8px;padding:10px 12px;border:1px solid var(--hair);border-radius:12px}
+.bar{display:flex;height:6px;border-radius:3px;background:var(--track);overflow:hidden;margin:4px 0 8px}
+.legend{display:flex;gap:12px;flex-wrap:wrap}
+.legend i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:5px}
+#files{margin-top:6px}
+@media (max-width:760px){body{grid-template-columns:minmax(0,1fr)}aside{position:fixed;inset:0 25% 0 0;z-index:10;transform:translateX(-100%);transition:transform .2s}
+  body.side aside{transform:none;box-shadow:0 0 40px rgba(0,0,0,.25)}#menu{display:block}.stage{padding:0 8px}}
+</style>
+</head>
+<body>
+<aside aria-label="Chats">
+  <div class="brand"><b>fronk</b><a href="/" title="Start the head, see the cluster">Console</a></div>
+  <button class="new" id="new">New chat</button>
+  <input id="q" type="search" placeholder="Search past chats" aria-label="Search past chats" autocomplete="off">
+  <nav id="list"></nav>
+</aside>
+<main>
+  <header>
+    <button id="menu" aria-label="Chats">☰</button>
+    <h1 id="title">New chat</h1>
+    <a class="pill" id="pill" href="/"><i></i><span>Checking…</span></a>
+    <div class="opts"><button id="optsb" aria-expanded="false">Options</button>
+      <div id="opts" hidden>
+        <label><input type="checkbox" id="think" checked> Show the model's thinking (slower)</label>
+        <label><input type="checkbox" id="terse"> Short answers</label>
+        <div class="ctxpick"><div>Context size</div><select id="ctxsel" aria-label="Context size"></select>
+          <small id="ctxnote"></small><button id="ctxapply" hidden>Apply · restarts the head (~15 s)</button></div>
+      </div></div>
+  </header>
+  <div class="stage">
+    <deep-chat id="dc"></deep-chat>
+    <div class="status" aria-live="polite">
+      <div class="line" id="line" title="Details"><span id="turnline">Ready when the cluster is.</span><div class="mini"><i id="m-r" class="r"></i><i id="m-p" class="p"></i><i id="m-t" class="t"></i><i id="m-a" class="a"></i></div></div>
+      <div class="more" id="more" hidden>
+        <div>Context of the last turn, out of 10,240 tokens</div>
+        <div class="bar"><i id="ctx-r" class="r"></i><i id="ctx-p" class="p"></i><i id="ctx-t" class="t"></i><i id="ctx-a" class="a"></i></div>
+        <div class="legend" id="ctxlegend"></div>
+        <div id="files"></div>
+      </div>
+    </div>
+  </div>
+</main>
+<script>
+const T="%TOKEN%",$=id=>document.getElementById(id),dc=$('dc');let CTX=10240;  /* ds4's --ctx, read from /api/model */
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt=n=>Math.round(n).toLocaleString('en-US'),secs=s=>s>=60?Math.floor(s/60)+'m '+String(Math.round(s%60)).padStart(2,'0')+'s':s.toFixed(1)+' s';
+const api=async(path,body)=>{const r=await fetch(path,body===undefined?{}:{method:'POST',headers:{'X-Fronk-Token':T,'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.message||'HTTP '+r.status);return j;};
+const store=(k,v)=>{try{v==null?localStorage.removeItem(k):localStorage.setItem(k,JSON.stringify(v));}catch(e){}};
+const load=k=>{try{return JSON.parse(localStorage.getItem(k)||'null');}catch(e){return null;}};
+
+/* ---- one chat: messages as shown, what was sent for each user turn (so the
+ * history ds4 sees is identical every time and its cache holds), its files,
+ * the summary after compaction, and which file passages the history holds. */
+const blank=()=>({id:Date.now().toString(36)+Math.random().toString(36).slice(2,8),title:'',messages:[],files:[],summary:null,sentLog:[]});
+let chat=blank(),chats=[];
+const THINK_MARK='> **Thinking**';
+const answerOnly=t=>t.startsWith(THINK_MARK)?(i=>i<0?'':t.slice(i+2))(t.indexOf('\n\n')):t;
+const literal=t=>t.replace(/[\\`*_#~[\]<>|]/g,'\\$&');
+function sentMap(){const m={};for(const e of chat.sentLog){if(e.what==='whole')m[e.id]='whole';else if(m[e.id]!=='whole')m[e.id]=(m[e.id]||[]).concat(e.what);}return m;}
+async function save(){if(!chat.messages.length)return;
+  try{await api('/api/chats/'+chat.id,chat);}catch(e){}refreshList();}
+async function refreshList(){if($('q').value.trim())return searchChats();try{chats=await api('/api/chats');}catch(e){chats=[];}
+  const day=86400e3,now=new Date(),start=new Date(now.getFullYear(),now.getMonth(),now.getDate()).getTime();
+  const group=t=>t*1000>=start?'Today':t*1000>=start-day?'Yesterday':t*1000>=start-7*day?'Previous 7 days':'Older';
+  let html='',last='';
+  for(const c of chats){const g=group(c.updated);if(g!==last){html+=`<h4>${g}</h4>`;last=g;}
+    html+=`<div class="item${c.id===chat.id?' on':''}" data-id="${c.id}"><span>${esc(c.title||'Untitled')}</span><button title="Delete" data-del="${c.id}" aria-label="Delete">×</button></div>`;}
+  $('list').innerHTML=html||'<h4>No chats yet</h4>';}
+/* Search: SQLite FTS5 over every message of every chat (fronk_chats.py). A hit
+ * opens its chat; Use attaches that chat to the current one, like a file, so
+ * the model can work on something asked in the past. */
+let qTimer=0;
+$('q').oninput=()=>{clearTimeout(qTimer);qTimer=setTimeout(searchChats,150);};
+$('q').onkeydown=e=>{if(e.key==='Escape'){$('q').value='';refreshList();}};
+async function searchChats(){const q=$('q').value.trim();if(!q)return refreshList();
+  let hits=[];try{hits=await api('/api/search?q='+encodeURIComponent(q));}catch(e){}
+  const seen=new Set(),snip=t=>esc(t).replace(/\[/g,'<mark>').replace(/\]/g,'</mark>').replace(/\*\*/g,'');
+  $('list').innerHTML=hits.filter(h=>!seen.has(h.chat+'/'+h.idx)&&seen.add(h.chat+'/'+h.idx)).map(h=>
+    `<div class="hit" data-open="${h.chat}"><button class="use" data-use="${h.chat}" title="Attach this chat to the current one">Use</button><b>${esc(h.title||'Untitled')}</b><small>${h.role==='ai'?'fronk: ':''}${snip(h.snippet)}</small></div>`).join('')
+    ||'<h4>Nothing found</h4>';}
+$('list').onclick=async e=>{const use=e.target.dataset.use,open=e.target.closest('[data-open]');
+  if(use){if(use===chat.id)return;try{const c=await api('/api/chats/'+use+'/attach',{});if(!chat.files.some(x=>x.id===c.id))chat.files.push(c);
+    panel({line:`<b>${esc(c.name)}</b> attached · ${fmt(c.tokens)} tokens · the next message can use it`});}catch(err){panel({line:esc(err.message)});}return;}
+  if(open){try{show(await api('/api/chats/'+open.dataset.open));}catch(err){}return;}
+  const del=e.target.dataset.del,it=e.target.closest('.item');
+  if(del){await api('/api/chats/'+del+'/delete',{});if(del===chat.id)newChat();else refreshList();return;}
+  if(it){try{show(await api('/api/chats/'+it.dataset.id));}catch(e){}document.body.classList.remove('side');}};
+function filesOf(m){return (m.attachments||[]).map(a=>a.thumb?{src:a.thumb,type:'image',name:a.name}:{src:'data:text/plain,',type:'any',name:a.name});}
+function show(c){chat=Object.assign(blank(),c);busyAbort();dc.clearMessages(true);
+  for(const m of chat.messages){const f=filesOf(m);dc.addMessage(Object.assign({role:m.role,text:m.text},f.length?{files:f}:{}));}
+  $('title').textContent=chat.title||'New chat';panel({line:chat.messages.length?'Opened.':'Ready when the cluster is.'});refreshList();}
+function newChat(){show(blank());}
+$('new').onclick=newChat;$('menu').onclick=()=>document.body.classList.toggle('side');
+
+/* ---- status of the cluster (the console's head) ---- */
+let ready=false,rendered=false,appliedReady=null;
+function applyReadiness(){
+  // Status may arrive before the chat component finishes rendering. Keep the
+  // cluster state separate from what this instance of the input has received.
+  if(!rendered||!dc.disableSubmitButton||!dc.setPlaceholderText||appliedReady===ready)return;
+  appliedReady=ready;dc.disableSubmitButton(!ready);
+  dc.setPlaceholderText(ready?'Message fronk':'Start the head in the console');
+}
+async function status(){let v;try{v=await (await fetch('/state')).json();}catch(e){v=null;}
+  const p=$('pill'),on=!!v&&v.waiting==='after';p.className='pill'+(on?' ok':v&&v.running?' wait':'');
+  p.querySelector('span').textContent=!v?'Console not reachable':on?'Ready'+(v.report&&v.report.toks?' · '+v.report.toks+' tok/s':''):v.running?'Starting · '+(v.phase||'')+'…':'Head not running · start it';
+  p.title=on?'The cluster is answering':'Open the console';
+  ready=on;applyReadiness();
+  setTimeout(status,3000);}
+
+/* ---- the status line and its details ---- */
+function panel(o){/* o: {line, reused, fresh, think, answer, files, exact} in tokens */
+  $('turnline').innerHTML=o.line||'';const seg={r:o.reused||0,p:o.fresh||0,t:o.think||0,a:o.answer||0};
+  for(const k in seg){$('ctx-'+k).style.width=$('m-'+k).style.width=(100*seg[k]/CTX)+'%';}
+  const used=seg.r+seg.p+seg.t+seg.a;
+  $('ctxlegend').innerHTML=used?`<span><i class="r"></i>reused ${fmt(seg.r)}</span><span><i class="p"></i>new prompt ${fmt(seg.p)}</span>`+
+    `<span><i class="t"></i>thinking ${fmt(seg.t)}</span><span><i class="a"></i>answer ${fmt(seg.a)}</span><b>${fmt(used)} of ${fmt(CTX)}${o.exact?'':' so far'}</b>`:'';
+  if(o.files!==undefined)$('files').innerHTML=o.files;}
+$('line').onclick=()=>{$('more').hidden=!$('more').hidden;};
+$('optsb').onclick=()=>{const h=!$('opts').hidden;$('opts').hidden=h;$('optsb').setAttribute('aria-expanded',!h);};
+/* Context size: ds4's memory for each size on this Mac (from its own load plans),
+ * against the head's 10 GB reserve for ds4. Bigger sizes cost expert blocks here,
+ * and every token of a full context is read at the cluster's prompt speed. */
+let sizes=null;
+const kTok=n=>(n/1024)+'K';
+async function loadSizes(){try{sizes=await api('/api/context-size');}catch(e){return;}
+  $('ctxsel').innerHTML=sizes.sizes.map(z=>`<option value="${z.ctx}"${z.ctx===sizes.current?' selected':''}>${kTok(z.ctx)} tokens${z.gb?' · ds4 uses '+z.gb+' GB':''}${z.blocks?` · costs ${z.blocks} expert block`:''}</option>`).join('');ctxNote();}
+function ctxNote(){if(!sizes)return;const n=+$('ctxsel').value,z=sizes.sizes.find(x=>x.ctx===n);
+  if(sizes.engine){$('ctxnote').textContent=sizes.engine+' uses GPU and system memory. Larger contexts increase memory use.';$('ctxapply').hidden=n===sizes.current;return;}
+  $('ctxnote').innerHTML=`This Mac keeps ${sizes.reserve_gb} GB for ds4: up to about ${kTok(sizes.fits_up_to)} tokens fit in it. `+
+    (z.blocks?`<b>${kTok(n)}</b> needs ${z.extra_gb} GB more, so the head holds ${z.blocks} fewer expert block here: unless this Mac has that much free memory, the plan drops below 20/20 and answers slow down. `:'')+
+    `A full ${kTok(n)} prompt takes about ${Math.round(n/25/60)} min to read at the cluster's ~25 tokens/s; later turns reuse what was read.`;
+  $('ctxapply').hidden=n===sizes.current;}
+$('ctxsel').onchange=ctxNote;
+$('ctxapply').onclick=async()=>{if(busy||warming){panel({line:'Wait for the current answer, then apply.'});return;}
+  try{const r=await api('/api/context-size',{ctx:+$('ctxsel').value});panel({line:esc(r.message)});}catch(e){panel({line:esc(e.message)});}
+  ready=false;setTimeout(()=>{api('/api/model').then(m=>{CTX=m.ctx;}).catch(()=>{});loadSizes();},20000);loadSizes();};
+loadSizes();
+for(const id of ['think','terse']){const v=load('fronk-'+id);if(v!==null)$(id).checked=v;$(id).onchange=()=>store('fronk-'+id,$(id).checked);}
+
+/* ---- long conversations (after the community's Claude Code token savers):
+ * a short style rule as the system prompt, "Short answers" adds a terse rule
+ * (as Caveman does), and compaction before the context fills: messages before
+ * the last KEEP are replaced by a summary the model writes. Those messages are
+ * still in ds4's cache, so asking for the summary costs only the instruction.
+ * compactAt() keeps ANSWER_ROOM tokens of ds4's context for thinking and answer. */
+const KEEP=4,ANSWER_ROOM=3700,compactAt=()=>CTX-ANSWER_ROOM;let ratio=3.5;
+const STYLE='Answer directly: no preamble, no restating the question, no closing offers. Use Markdown when structure helps. Keep code, numbers and names exact and complete. Files the user attaches arrive inside <file> tags, already converted to text by fronk (photos by OCR); say so when something you need is not in them.';
+const TERSE=' Be terse: short sentences, no filler words.';
+const SUMMARIZE='Summarize our conversation so far for your own later use: the facts, names, numbers, decisions, code, the files and what they contain, and open questions, in at most 300 words. Write only the summary.';
+const chars=ms=>ms.reduce((n,m)=>n+m.content.length,0);
+const system=sum=>[{role:'system',content:STYLE+($('terse').checked?TERSE:'')+(sum?'\n\nSummary of the earlier conversation (the user still sees it in full; you only have this summary):\n'+sum.text:'')}];
+const history=()=>chat.messages.map(m=>({role:m.role==='ai'?'assistant':'user',content:(m.role==='ai'?answerOnly(m.text):(m.sent??m.text))||'(empty)'}));  /* index i = chat.messages[i] */
+async function sse(messages,think,signal,onDelta,warm=false){
+  const r=await fetch('/chat',{method:'POST',signal,headers:{'X-Fronk-Token':T,'Content-Type':'application/json'},body:JSON.stringify({messages,think,warm})});
+  if(!r.ok)throw new Error((await r.json()).message||'HTTP '+r.status);
+  const rd=r.body.getReader(),dec=new TextDecoder();let buf='',usage=null,finish='';
+  for(;;){const {value,done}=await rd.read();if(done)break;buf+=dec.decode(value,{stream:true});let k;
+    while((k=buf.indexOf('\n'))>=0){const line=buf.slice(0,k).trim();buf=buf.slice(k+1);
+      if(!line.startsWith('data:')||line==='data: [DONE]')continue;let j;try{j=JSON.parse(line.slice(5));}catch(e){continue;}
+      if(j.error)throw new Error(typeof j.error==='string'?j.error:(j.error.message||'error'));
+      if(j.usage)usage=j.usage;const c=j.choices&&j.choices[0];if(c&&c.finish_reason)finish=c.finish_reason;
+      const d=(c&&c.delta)||{};if(d.reasoning_content||d.content)await onDelta(d);}}
+  return {usage,finish};}
+async function compact(msgs,signal,reserve,say){/* msgs: history plus the new user message */
+  let sum=chat.summary;const out=()=>system(sum).concat(msgs.slice(sum?sum.upto:0));
+  if(chars(out())/ratio<=compactAt()-reserve||msgs.length-1-(sum?sum.upto:0)<=KEEP)return {messages:out(),compacted:0};
+  const upto=msgs.length-1-KEEP,from=sum?sum.upto:0;let text='';
+  say(`<b>Compacting</b> ${upto-from} earlier messages into a summary`);
+  await sse(system(sum).concat(msgs.slice(from,upto),[{role:'user',content:SUMMARIZE}]),false,signal,d=>{if(d.content)text+=d.content;});
+  if(text.trim()){sum=chat.summary={upto,text:text.trim()};chat.sentLog=chat.sentLog.filter(e=>e.at>=upto);}
+  return {messages:out(),compacted:text.trim()?upto-from:0};}
+
+/* ---- attachments: uploaded once, converted by fronk_files.py on this Mac ---- */
+async function thumb(file){if(!file.type.startsWith('image/'))return '';
+  try{const b=await createImageBitmap(file),s=Math.min(1,320/Math.max(b.width,b.height)),c=document.createElement('canvas');
+    c.width=Math.round(b.width*s);c.height=Math.round(b.height*s);c.getContext('2d').drawImage(b,0,0,c.width,c.height);return c.toDataURL('image/jpeg',.8);}catch(e){return '';}}
+async function upload(file){const r=await fetch('/api/files',{method:'POST',headers:{'X-Fronk-Token':T,'X-File-Name':encodeURIComponent(file.name)},body:file});
+  const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.message||'HTTP '+r.status);return j;}
+const fileLine=f=>`<div>${esc(f.name)} · ${esc(f.how)} · ${fmt(f.tokens)} tokens</div>`;
+/* Files are prepared the moment they are attached, while the user types: by
+ * the time the message is sent they are ready (each File uploads once). */
+const pending=new Map();
+function prepare(f){if(!pending.has(f))pending.set(f,upload(f).then(c=>{if(!busy)panel({line:`${esc(c.name)} ready · ${esc(c.how)} · ${fmt(c.tokens)} tokens`});return c;},
+  e=>{pending.delete(f);if(!busy)panel({line:`<b>${esc(f.name)}</b>: ${esc(e.message)}`});throw e;}));return pending.get(f);}
+
+/* Room for files in a turn: the context minus what is sent and the answer's room. */
+const fileBudget=msgs=>Math.max(400,Math.round(CTX-ANSWER_ROOM-chars(msgs)/ratio));
+/* Read ahead: when a file that fits whole is ready, ds4 starts reading it at once,
+ * in the same place the next message will put it (history, then the file). When
+ * the question is sent, ds4 reuses that prefix and reads only the question.
+ * Skipped when the file would not go whole or the conversation needs compaction. */
+let warming=null;
+async function readAhead(card){
+  if(busy||warming||!ready||sentMap()[card.id])return;
+  const files=chat.files.concat(chat.files.some(x=>x.id===card.id)?[]:[card]);
+  const msgs=system(chat.summary).concat(history().slice(chat.summary?chat.summary.upto:0));
+  if(chars(msgs)/ratio+card.tokens>compactAt())return;
+  const c=await api('/api/context',{files:files.map(f=>f.id),query:'',budget:fileBudget(msgs)-200,sent:sentMap()}).catch(()=>null);
+  if(!c||!c.text||c.files.some(f=>f.mode!=='whole'))return;
+  const ctl=new AbortController();warming={ctl,name:card.name};let before=-1;
+  try{before=(await api('/chat/progress')).turn??-1;}catch(e){}
+  const tick=setInterval(async()=>{if(busy)return;try{const p=await api('/chat/progress');if(p.phase&&p.turn!==before&&p.phase==='prefill')
+    panel({line:`Reading ${esc(card.name)} ahead · ${fmt(p.read)} / ${fmt(p.new)} tokens · ${p.rate.toFixed(1)} t/s`});}catch(e){}},1000);
+  try{await sse(msgs.concat([{role:'user',content:c.text}]),$('think').checked,ctl.signal,()=>{},true);
+    if(!busy)panel({line:`${esc(card.name)} read · questions about it start right away`});}catch(e){}
+  clearInterval(tick);warming=null;}
+
+/* ---- one turn ---- */
+let busy=null;const busyAbort=()=>{if(busy)busy.abort();busy=null;};
+async function turn(body,signals){
+  let text='',files=[];
+  if(body instanceof FormData){files=body.getAll('files');const keys=[...body.keys()].filter(k=>/^message\d+$/.test(k)).sort((a,b)=>+a.slice(7)-+b.slice(7));
+    const last=keys.length?JSON.parse(body.get(keys[keys.length-1])):{};text=last.text||'';}
+  else{const ms=body.messages||[];text=(ms[ms.length-1]||{}).text||'';}
+  const ctl=new AbortController();busy=ctl;signals.stopClicked.listener=()=>ctl.abort();
+  const think=$('think').checked,t0=performance.now();
+  let opened=false,inThink=false,answering=false,nThink=0,nAns=0,tFirst=0,usage=null,finish='',err='',prog={},stamps=[],stage='',compacted=0,added=[],sendMsgs=[];
+  const say=l=>{stage=l;live();};
+  const send=async t=>{if(!opened){signals.onOpen();opened=true;}await signals.onResponse({text:t});};
+  const live=()=>{const now=performance.now(),el=(now-t0)/1000;stamps=stamps.filter(s=>now-s<3000);
+    const rate=stamps.length>1?(stamps.length-1)/((stamps[stamps.length-1]-stamps[0])/1000||1):0;let line;
+    if(stage)line=stage+` · ${secs(el)}`;
+    else if(!tFirst){const n=prog.new||0,read=prog.read||0,r=prog.rate||0;
+      line=prog.phase==='prefill'&&n?`<b>Reading</b> ${fmt(read)} / ${fmt(n)} new tokens · ${r.toFixed(1)} t/s`+(r&&n>read?` · about ${secs((n-read)/r)} left`:'')+` · ${secs(el)}`:`<b>Sending</b> · ${secs(el)}`;}
+    else line=`<b>${answering?'Answering':'Thinking'}</b> ${fmt(answering?nAns:nThink)} tokens · ${rate.toFixed(1)} tok/s · ${secs(el)}`;
+    panel({line,reused:prog.reused,fresh:prog.new,think:nThink,answer:nAns});};
+  let before=-1;try{before=(await api('/chat/progress')).turn??-1;}catch(e){}
+  const fresh=p=>p.phase&&p.turn!==before;
+  const poller=setInterval(async()=>{try{const p=await api('/chat/progress');if(fresh(p))prog=p;}catch(e){}live();},500);
+  const user={role:'user',text,attachments:[]};
+  try{
+    for(const f of files){say(`<b>Preparing</b> ${esc(f.name)}`);const c=await prepare(f);added.push(c);
+      user.attachments.push({id:c.id,name:c.name,kind:c.kind,thumb:await thumb(f)});
+      if(!chat.files.some(x=>x.id===c.id))chat.files.push(c);}
+    if(!chat.title)chat.title=(text||(added[0]&&added[0].name)||'New chat').replace(/\s+/g,' ').slice(0,60);
+    $('title').textContent=chat.title;
+    chat.messages.push(user);const at=chat.messages.length-1;
+    const msgs=history();
+    const newTokens=chat.files.filter(f=>!sentMap()[f.id]).reduce((n,f)=>n+f.tokens,0);  /* files not yet in the history */
+    const p=await compact(msgs,ctl.signal,Math.min(newTokens,compactAt()/2),say);compacted=p.compacted;sendMsgs=p.messages;
+    let content=text||'Look at the attached files.';
+    if(chat.files.length){say('<b>Choosing</b> what the model needs from the files');
+      const budget=fileBudget(sendMsgs);
+      const c=await api('/api/context',{files:chat.files.map(f=>f.id),query:text||'overview',budget,sent:sentMap()});
+      for(const f of c.files)chat.sentLog.push({id:f.id,what:f.sent,at});
+      if(c.text)content=c.text+'\n\n'+content;
+      panel({files:c.files.map(f=>`<div>${esc(f.name)}: ${f.mode==='whole'?'sent whole':`${f.chosen} of ${f.of} passages sent`} · ${fmt(f.tokens)} tokens</div>`).join('')+added.map(fileLine).join('')});}
+    user.sent=content;sendMsgs[sendMsgs.length-1]={role:'user',content};stage='';
+    ({usage,finish}=await sse(sendMsgs,think,ctl.signal,async d=>{const now=performance.now();
+      if(d.reasoning_content){if(!tFirst)tFirst=now;stamps.push(now);++nThink;
+        await send((inThink?'':THINK_MARK+'\n> \n> ')+literal(d.reasoning_content).replace(/\n/g,'\n> '));inThink=true;}
+      if(d.content){if(!tFirst)tFirst=now;if(!answering){answering=true;stamps=[];}stamps.push(now);++nAns;
+        await send((inThink?'\n\n':'')+d.content);inThink=false;}
+      live();}));}
+  catch(e){if(e.name!=='AbortError')err=String(e.message||e);}
+  clearInterval(poller);busy=null;
+  if(err)await signals.onResponse({error:err});
+  if(opened)signals.onClose();else if(!err)await signals.onResponse({text:'(no answer)'});
+  const shown=dc.getMessages(),lastAi=shown[shown.length-1];
+  if(lastAi&&lastAi.role==='ai'&&opened)chat.messages.push({role:'ai',text:lastAi.text||''});
+  else if(chat.messages[chat.messages.length-1]===user&&!opened){chat.messages.pop();}
+  if(usage&&usage.prompt_tokens>200)ratio=Math.min(6,Math.max(2,chars(sendMsgs)/usage.prompt_tokens));
+  try{const p=await api('/chat/progress');if(fresh(p))prog=p;}catch(e){}
+  const el=(performance.now()-t0)/1000,out=usage?usage.completion_tokens:nThink+nAns,gen=tFirst?(performance.now()-tFirst)/1000:0;
+  const cached=usage?((usage.prompt_tokens_details||{}).cached_tokens||prog.reused||0):prog.reused||0,prompt=usage?usage.prompt_tokens:(prog.reused||0)+(prog.new||0);
+  const thinkT=usage&&nThink+nAns?Math.round(out*nThink/(nThink+nAns)):nThink;
+  panel({exact:!!usage,reused:cached,fresh:prompt-cached,think:thinkT,answer:out-thinkT,
+    line:err?`<b>Stopped</b> ${esc(err)}`:`<b>${finish==='length'?'Cut: the context is full':ctl.signal.aborted?'Stopped':'Done'}</b> in ${secs(el)}`+
+      (tFirst?` · first token ${secs((tFirst-t0)/1000)}`:'')+(gen>0.5&&out>1?` · ${fmt(out)} tokens at ${(prog.decode_rate||(out-1)/gen).toFixed(1)} tok/s`:'')+
+      ` · ${fmt(prompt+out)} of ${fmt(CTX)} context`+(compacted?` · ${compacted} earlier messages summarized`:'')});
+  save();}
+
+customElements.whenDefined('deep-chat').then(()=>Object.assign(dc,{
+  connect:{stream:true,handler:turn},
+  requestBodyLimits:{maxMessages:1},  /* the page builds the history itself */
+  mixedFiles:{button:{position:'inside-start'},files:{maxNumberOfFiles:8,acceptedFormats:'.pdf,.png,.jpg,.jpeg,.heic,.heif,.gif,.tif,.tiff,.webp,.bmp,.doc,.docx,.rtf,.odt,.html,.htm,.pptx,.xlsx,.xlsm,.csv,.tsv,.txt,.md,.json,.xml,.c,.h,.py,.js,.ts,.swift,.go,.rs,.java,.sh,.sql,.yml,.yaml,.toml'}},
+  dragAndDrop:true,
+  onInput:({content})=>{for(const f of content.files||[])prepare(f).then(readAhead).catch(()=>{});},
+  introMessage:{html:'<div style="text-align:center;padding:18vh 0 0;color:var(--quiet)"><div style="font-size:22px;color:var(--ink);font-weight:600;margin-bottom:6px">How can I help?</div>Runs on your machines. Attach photos and documents with the clip.</div>'},
+  chatStyle:{width:'100%',height:'100%',border:'none',backgroundColor:'var(--paper)',fontFamily:'var(--text)',fontSize:'15.5px',color:'var(--ink)'},
+  messageStyles:{default:{shared:{bubble:{maxWidth:'100%',borderRadius:'16px',padding:'9px 14px',lineHeight:'1.55'}},
+    user:{bubble:{backgroundColor:'var(--mist)',color:'var(--ink)',maxWidth:'78%'}},ai:{bubble:{backgroundColor:'transparent',color:'var(--ink)',padding:'4px 2px'}}},
+    intro:{bubble:{backgroundColor:'transparent',maxWidth:'100%',width:'100%'}}},
+  textInput:{placeholder:{text:'Start the head in the console'},
+    styles:{container:{borderRadius:'16px',border:'1px solid var(--hair)',backgroundColor:'var(--paper)',color:'var(--ink)',boxShadow:'0 2px 12px rgba(0,0,0,.06)',width:'calc(100% - 24px)',padding:'4px 4px 4px 34px'}}},
+  auxiliaryStyle:'pre{background:#0f1213;color:#cfe9e4;border-radius:12px;padding:12px 14px;overflow:auto} code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:13px} p{margin:0 0 9px} p:last-child{margin:0}'+
+    ' blockquote{margin:0 0 10px;padding:6px 10px;border-left:3px solid var(--hair);color:var(--quiet);font-size:13px;max-height:200px;overflow:auto} blockquote p{margin:0 0 4px}'+
+    ' #messages{scrollbar-width:thin} .outer-message-container:first-child{margin-top:16px}',
+  onComponentRender:()=>{rendered=true;appliedReady=null;applyReadiness();}}));
+api('/api/model').then(m=>{CTX=m.ctx;}).catch(()=>{});
+refreshList();status();
+</script>
+<script type="module" src="/vendor/deep-chat.js"></script>
+</body>
+</html>

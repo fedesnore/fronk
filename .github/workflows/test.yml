@@ -1,0 +1,29 @@
+name: Core and documentation
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  core:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: python3 tools/check-docs.py
+      - run: python3 -m unittest discover -s tests -p 'test_*.py'
+      - run: bash tests/backend-modules.sh
+      - run: python3 tools/release/export-source.py build/public-check
+      - run: make engine
+        working-directory: build/public-check
+      - run: make DS4= test-core
+        working-directory: build/public-check
+      - run: make DS4= test-plane-cluster
+        working-directory: build/public-check
+      - name: Installer lifecycle from the exported source
+        run: FRONK_TEST_MANAGER="$PWD/tools/install/fronk-install.sh" bash tests/installer.sh
+        working-directory: build/public-check

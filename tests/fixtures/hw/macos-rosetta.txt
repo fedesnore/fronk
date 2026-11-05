@@ -1,0 +1,15 @@
+os:macos
+arch:x86_64
+cpu_model:Apple M4 Pro
+gpu_name:none
+cores:14
+logical_cores:14
+isa:none
+translated:1
+metal:0
+mem_total_bytes:25769803776
+mem_available_bytes:10641391616
+mem_margin_bytes:2576980377
+mem_cap_bytes:8064411239
+metal_working_set_bytes:0
+backend:ref

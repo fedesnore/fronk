@@ -1,0 +1,27 @@
+Graphics/Displays:
+
+    Radeon Pro 580:
+
+      Chipset Model: Radeon Pro 580
+      Type: GPU
+      Bus: PCIe
+      PCIe Lane Width: x16
+      VRAM (Total): 8 GB
+      Vendor: AMD (0x1002)
+      Device ID: 0x67df
+      Revision ID: 0x00c0
+      ROM Revision: 113-D000AA-931
+      VBIOS Version: 113-D0001A1X-025
+      EFI Driver Version: 01.00.931
+      Metal Support: Metal 2
+      Displays:
+        iMac:
+          Display Type: Built-In Retina LCD
+          Resolution: Retina 5K (5120 x 2880)
+          Framebuffer Depth: 30-Bit Color (ARGB2101010)
+          Main Display: Yes
+          Mirror: Off
+          Online: Yes
+          Automatically Adjust Brightness: Yes
+          Connection Type: Internal
+

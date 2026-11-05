@@ -1,0 +1,312 @@
+--- a/ds4.c
++++ b/ds4.c
+@@ -57607,7 +57607,12 @@
+     X(moe_lists) X(moe_counts) X(sh_gate) X(sh_up) X(sh_mid) X(sh_out) \
+     X(hc_u) X(hc_lo_act)
+ 
++struct fronk_tree;
++static void fronk_tree_free(struct fronk_tree *tree);
+ typedef struct ds4_qwen4_gpu_graph {
++    struct fronk_tree *fronk_tree;
++    uint64_t fronk_resume_value;
++    bool fronk_defer_reduce, fronk_shared_local;
+     uint32_t ctx_cap;
+     uint32_t pos;
+     uint32_t cap_tokens;
+@@ -57779,6 +57784,7 @@
+ }
+ 
+ static void qwen4_graph_free(ds4_qwen4_gpu_graph *g) {
++    if (g && g->fronk_tree) { fronk_tree_free(g->fronk_tree); g->fronk_tree = NULL; }
+     if (!g) return;
+     ds4_gpu_tensor **all[] = {
+         &g->ple_hist, &g->logits,
+@@ -58632,54 +58638,13 @@
+     pthread_mutex_t mu; pthread_cond_t cv; pthread_t th; bool started;
+     qwen4_fronk_job q[512]; unsigned head, tail; volatile int error; uint64_t seq;
+ } qwen4_fronk = { .mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER };
+-static void *qwen4_fronk_worker(void *arg) {
+-    (void)arg;
+-    float *x = NULL, *w = NULL, *sh = NULL, *y = NULL, *ones = NULL; int32_t *ids = NULL; uint32_t cap = 0;
+-    const int prof = getenv("FRONK_PROFILE") != NULL; double acc[6] = {0}, last = 0; unsigned calls = 0;
+-    for (;;) {
+-        pthread_mutex_lock(&qwen4_fronk.mu);
+-        while (qwen4_fronk.head == qwen4_fronk.tail) pthread_cond_wait(&qwen4_fronk.cv, &qwen4_fronk.mu);
+-        qwen4_fronk_job j = qwen4_fronk.q[qwen4_fronk.head % 512]; qwen4_fronk.head++;
+-        pthread_mutex_unlock(&qwen4_fronk.mu);
+-        const uint32_t T = j.T; bool ok = true;
+-        if (T > cap) {
+-            x = realloc(x, (size_t)T * DS4_N_EMBD * sizeof(float)); y = realloc(y, (size_t)T * DS4_N_EMBD * sizeof(float));
+-            w = realloc(w, (size_t)T * DS4_N_EXPERT_USED * sizeof(float)); ids = realloc(ids, (size_t)T * DS4_N_EXPERT_USED * sizeof(int32_t));
+-            sh = realloc(sh, T * sizeof(float)); ones = realloc(ones, T * sizeof(float));
+-            ok = x && y && w && ids && sh && ones; cap = ok ? T : 0;
+-        }
+-        const double t0 = prof ? qwen4_fronk_now() : 0;
+-        ok = ok && ds4_gpu_fronk_wait(j.ready, 120000.0) != 0;
+-        const double t1 = prof ? qwen4_fronk_now() : 0;
+-        uint32_t missing = 0;
+-        if (ok) for (uint32_t t = 0; t < T; t++) ones[t] = 1.0f;
+-        ok = ok &&
+-            ds4_gpu_tensor_read(j.g->mixed, 0, x, (uint64_t)T * DS4_N_EMBD * sizeof(float)) != 0 &&
+-            ds4_gpu_tensor_read(j.g->selected, 0, ids, (uint64_t)T * DS4_N_EXPERT_USED * sizeof(int32_t)) != 0 &&
+-            ds4_gpu_tensor_read(j.g->weights, 0, w, (uint64_t)T * DS4_N_EXPERT_USED * sizeof(float)) != 0 &&
+-            (j.shared_local || ds4_gpu_tensor_read(j.g->sh_gate_logit, 0, sh, (uint64_t)T * sizeof(float)) != 0) &&
+-            fronk_moe(j.layer, T, x, ids, w, j.shared_local ? NULL : sh, y, &missing) == 0;
+-        const double t2 = prof ? qwen4_fronk_now() : 0;
+-        ok = ok &&
+-            ds4_gpu_tensor_write(j.g->part, 0, y, (uint64_t)T * DS4_N_EMBD * sizeof(float)) != 0 &&
+-            ds4_gpu_tensor_write(j.g->weights, 0, ones, (uint64_t)T * sizeof(float)) != 0;
+-        if (!ok) { qwen4_fronk.error = 1; fprintf(stderr, "ds4: fronk expert call failed for layer %u\n", j.layer); }
+-        if (!ds4_gpu_fronk_signal(j.resume)) { /* always: the GPU must never wait forever */
+-            qwen4_fronk.error = 1; fprintf(stderr, "ds4: fronk GPU resume poll timed out\n");
+-        }
+-        if (prof) {
+-            /* idle: worker waiting for the main thread to queue the next layer;
+-             * gaps over 2 ms are step boundaries (sampling, MTP draft, output head). */
+-            if (last > 0 && t0 - last < 1e6) { if (t0 - last > 2000) { acc[4] += t0 - last; acc[5]++; } else acc[0] += t0 - last; }
+-            acc[1] += t1 - t0; acc[2] += t2 - t1; acc[3] += T; last = qwen4_fronk_now();
+-            if (++calls % 480 == 0) {
+-                fprintf(stderr, "FRONK_PROFILE pipeline calls=%u avg_T=%.2f us/call: idle=%.0f gpu_until_ready=%.0f cluster=%.0f; boundaries=%.0f avg=%.0f us\n",
+-                        calls, acc[3] / 480, acc[0] / 480, acc[1] / 480, acc[2] / 480, acc[5], acc[5] ? acc[4] / acc[5] : 0);
+-                memset(acc, 0, sizeof(acc));
+-            }
+-        }
+-    }
+-    return NULL;
++static uint64_t fronk_tree_overlaps;
++#include "fronk_mtp_worker.inc"
++static bool fronk_finish_experts(ds4_qwen4_gpu_graph *g, uint32_t T, uint64_t resume, int shared_local) {
++    bool ok = ds4_gpu_fronk_resume(resume) != 0;
++    return ok && ds4_gpu_qwen4_moe_reduce_tensor(g->blk, g->part, g->weights,
++                                                 shared_local ? g->sh_gate_logit : NULL, shared_local ? g->sh_out : NULL,
++                                                 g->R, g->inj, T, 1, 1, DS4_N_EMBD, DS4_N_HC) != 0;
+ }
+ static bool qwen4_graph_moe_fronk_pipe(ds4_qwen4_gpu_graph *g, const ds4_model *m, const ds4_layer_weights *l, uint32_t T) {
+     static int shared_local = -1;
+@@ -58689,7 +58654,7 @@
+         if (pthread_create(&qwen4_fronk.th, NULL, qwen4_fronk_worker, NULL) != 0) return false;
+         pthread_detach(qwen4_fronk.th); qwen4_fronk.started = true;
+     }
+-    if (qwen4_fronk.error) return false;
++    if (__atomic_load_n(&qwen4_fronk.error, __ATOMIC_ACQUIRE)) return false;
+     const uint64_t seq = ++qwen4_fronk.seq, ready = 2 * seq - 1, resume = 2 * seq;
+     bool ok = ds4_gpu_fronk_ready(ready) != 0;
+     /* The shared expert runs on this GPU while the cluster computes the routed ones. */
+@@ -58703,10 +58668,12 @@
+     else qwen4_fronk.q[qwen4_fronk.tail++ % 512] = (qwen4_fronk_job){ g, (unsigned)qwen4_fronk_layer(l), T, ready, resume, shared_local == 1 };
+     pthread_cond_signal(&qwen4_fronk.cv);
+     pthread_mutex_unlock(&qwen4_fronk.mu);
+-    ok = ok && ds4_gpu_fronk_resume(resume) != 0;
+-    return ok && ds4_gpu_qwen4_moe_reduce_tensor(g->blk, g->part, g->weights,
+-                                                 shared_local ? g->sh_gate_logit : NULL, shared_local ? g->sh_out : NULL,
+-                                                 g->R, g->inj, T, 1, 1, DS4_N_EMBD, DS4_N_HC) != 0;
++    if (g->fronk_defer_reduce) {
++        g->fronk_resume_value = resume;
++        g->fronk_shared_local = shared_local != 0;
++        return ok;
++    }
++    return ok && fronk_finish_experts(g, T, resume, shared_local);
+ }
+ #endif
+ 
+@@ -58917,6 +58884,44 @@
+  * everything is causal by construction because the recurrent kernels walk
+  * tokens in order and attention reads the caches written for the same
+  * chunk.  g->R keeps the pre-mixer streams of every row afterwards. */
++static bool fronk_ple_layer(ds4_qwen4_gpu_graph *g, const ds4_model *m, const ds4_layer_weights *l,
++                            uint32_t il, uint32_t T, uint32_t hc_dim) {
++    if (!ds4_qwen4_layer_is_ple(il)) return true;
++    return qwen4_gemv(g->ple_key, m, l->ple_key, g->ple_emb, T) &&
++                 qwen4_gemv(g->ple_val, m, l->ple_value, g->ple_emb, T) &&
++                 ds4_gpu_qwen4_ple_gate_tensor(g->ple_gated, g->ple_normed, g->R, g->ple_key, g->ple_val,
++                                               m->map, m->size, l->ple_norm_key->abs_offset,
++                                               l->ple_norm_query->abs_offset, l->ple_norm_conv->abs_offset,
++                                               T, DS4_N_EMBD, DS4_N_HC, DS4_RMS_EPS) &&
++                 ds4_gpu_qwen4_ple_conv_tensor(g->R, g->ple_gated, g->ple_normed, g->ple_hist, m->map, m->size,
++                                               l->ple_conv->abs_offset, l->ple_conv->type, T, hc_dim, DS4_N_PLE_CONV,
++                                               DS4_N_PLE_NGRAM, g->snap_after_first ? g->snap_ple_hist : NULL, 0u,
++                                               g->snap_after_second ? g->snap2_ple_hist : NULL, 1u);
++}
++
++static bool fronk_ffn_mix(ds4_qwen4_gpu_graph *g, const ds4_model *m, const ds4_layer_weights *l, uint32_t T) {
++    bool ok = true;
++        if (T == 1u && !g->mtp_R && DS4_N_HC == 4u && ds4_gpu_qwen4_decode_fusions_enabled() &&
++            l->hc_ffn_inject->type == DS4_TENSOR_F16) {
++            if (ok) ok = ds4_gpu_qwen4_hc_combine_norm_tensor(g->hc_u, g->blk, g->inj,
++                g->xn, g->inj_alt, g->R, m->map, m->size, l->hc_ffn_norm->abs_offset,
++                l->hc_ffn_inject->abs_offset, l->hc_ffn_inject->type, T, DS4_N_EMBD, DS4_N_HC, DS4_N_HC, DS4_RMS_EPS);
++            if (ok) {
++                /* hc_u is unused by the single-token fused mixer. Both residual
++                 * buffers have the same capacity, including for later prefill. */
++                ds4_gpu_tensor *swap = g->R; g->R = g->hc_u; g->hc_u = swap;
++                swap = g->inj; g->inj = g->inj_alt; g->inj_alt = swap;
++                ok = qwen4_gemv(g->lo, m, l->hc_ffn_down, g->xn, T) &&
++                    ds4_gpu_qwen4_hc_gate_mix_tensor(g->mixed, g->xn, g->lo, m->map, m->size,
++                        l->hc_ffn_up->abs_offset, l->hc_ffn_up->type, T, DS4_N_EMBD, DS4_N_HC, DS4_N_HC_LOWRANK);
++            }
++        } else {
++            if (ok) ok = ds4_gpu_qwen4_hc_combine_tensor(g->R, g->blk, g->inj, T, DS4_N_EMBD, DS4_N_HC) != 0;
++            if (ok) ok = qwen4_graph_hc_mix(g, m, l->hc_ffn_norm, l->hc_ffn_down, l->hc_ffn_up, l->hc_ffn_inject, T);
++        }
++    return ok;
++}
++
+ static bool qwen4_graph_forward_tokens(ds4_qwen4_gpu_graph *g, const ds4_model *m, const ds4_weights *w,
+                                        const int *tokens, uint32_t T, float *logits_out, bool all_rows) {
+     if (!g || T == 0 || T > g->cap_tokens || g->pos + T > g->ctx_cap) return false;
+@@ -58967,18 +58972,7 @@
+     } while (0)
+     for (uint32_t il = 0; il < n_trunk && ok; il++) {
+         const ds4_layer_weights *l = &w->layer[il];
+-        if (ds4_qwen4_layer_is_ple(il)) {
+-            ok = qwen4_gemv(g->ple_key, m, l->ple_key, g->ple_emb, T) &&
+-                 qwen4_gemv(g->ple_val, m, l->ple_value, g->ple_emb, T) &&
+-                 ds4_gpu_qwen4_ple_gate_tensor(g->ple_gated, g->ple_normed, g->R, g->ple_key, g->ple_val,
+-                                               m->map, m->size, l->ple_norm_key->abs_offset,
+-                                               l->ple_norm_query->abs_offset, l->ple_norm_conv->abs_offset,
+-                                               T, DS4_N_EMBD, DS4_N_HC, DS4_RMS_EPS) &&
+-                 ds4_gpu_qwen4_ple_conv_tensor(g->R, g->ple_gated, g->ple_normed, g->ple_hist, m->map, m->size,
+-                                               l->ple_conv->abs_offset, l->ple_conv->type, T, hc_dim, DS4_N_PLE_CONV,
+-                                               DS4_N_PLE_NGRAM, g->snap_after_first ? g->snap_ple_hist : NULL, 0u,
+-                                               g->snap_after_second ? g->snap2_ple_hist : NULL, 1u);
+-        }
++        ok = fronk_ple_layer(g, m, l, il, T, hc_dim);
+         QWEN4_PROF(0);
+         if (ok) ok = qwen4_graph_hc_mix(g, m, l->hc_attn_norm, l->hc_attn_down, l->hc_attn_up, l->hc_attn_inject, T);
+         QWEN4_PROF(1);
+@@ -58993,24 +58987,7 @@
+             ok = qwen4_graph_apply_steering_attn(g, il, T);
+         }
+         QWEN4_PROF(ds4_qwen4_layer_is_linear(il) ? 2 : 3);
+-        if (T == 1u && !g->mtp_R && DS4_N_HC == 4u && ds4_gpu_qwen4_decode_fusions_enabled() &&
+-            l->hc_ffn_inject->type == DS4_TENSOR_F16) {
+-            if (ok) ok = ds4_gpu_qwen4_hc_combine_norm_tensor(g->hc_u, g->blk, g->inj,
+-                g->xn, g->inj_alt, g->R, m->map, m->size, l->hc_ffn_norm->abs_offset,
+-                l->hc_ffn_inject->abs_offset, l->hc_ffn_inject->type, T, DS4_N_EMBD, DS4_N_HC, DS4_N_HC, DS4_RMS_EPS);
+-            if (ok) {
+-                /* hc_u is unused by the single-token fused mixer. Both residual
+-                 * buffers have the same capacity, including for later prefill. */
+-                ds4_gpu_tensor *swap = g->R; g->R = g->hc_u; g->hc_u = swap;
+-                swap = g->inj; g->inj = g->inj_alt; g->inj_alt = swap;
+-                ok = qwen4_gemv(g->lo, m, l->hc_ffn_down, g->xn, T) &&
+-                    ds4_gpu_qwen4_hc_gate_mix_tensor(g->mixed, g->xn, g->lo, m->map, m->size,
+-                        l->hc_ffn_up->abs_offset, l->hc_ffn_up->type, T, DS4_N_EMBD, DS4_N_HC, DS4_N_HC_LOWRANK);
+-            }
+-        } else {
+-            if (ok) ok = ds4_gpu_qwen4_hc_combine_tensor(g->R, g->blk, g->inj, T, DS4_N_EMBD, DS4_N_HC) != 0;
+-            if (ok) ok = qwen4_graph_hc_mix(g, m, l->hc_ffn_norm, l->hc_ffn_down, l->hc_ffn_up, l->hc_ffn_inject, T);
+-        }
++        if (ok) ok = fronk_ffn_mix(g, m, l, T);
+         QWEN4_PROF(4);
+         if (ok) ok = qwen4_graph_moe(g, m, l, T);   /* the reduce folds the combine in */
+         if (ok && g->dump_prompt_rows)
+@@ -59050,6 +59027,9 @@
+     }
+     const double t2 = timing ? now_sec() : 0.0;
+     if (!ds4_gpu_end_commands()) ok = false;
++#ifdef DS4_HAS_QWEN4_METAL
++    if (fronk_enabled() && __atomic_load_n(&qwen4_fronk.error, __ATOMIC_ACQUIRE)) ok = false;
++#endif
+     const double t3 = timing ? now_sec() : 0.0;
+     if (ok && logits_out) {
+         const uint64_t rows = all_rows ? T : 1u;
+@@ -74549,6 +74529,12 @@
+     return j + 1;
+ }
+ 
++#ifdef DS4_HAS_QWEN4_METAL
++#include "fronk_mtp_tree.inc"
++#else
++static void fronk_tree_free(struct fronk_tree *tree) { (void)tree; }
++#endif
++
+ /* One Qwen3.8 MTP cycle: evaluate first_token, or verify [first_token, draft]
+  * — plus a second chained draft when the depth policy engages it — in one
+  * 2- or 3-row pass.  Greedy and opportunistic sampling accept a draft when
+@@ -74568,6 +74554,13 @@
+         const int n = qwen4_lookup_cycle(s, first_token, accepted, accepted_cap, exact_sampling, temperature, err, errlen);
+         if (n != 0) return n;
+     }
++#ifdef DS4_HAS_QWEN4_METAL
++    if (fronk_enabled() && (temperature == 0.0f || exact_sampling)) {
++        int n = fronk_tree_cycle(s, first_token, temperature, top_k, top_p, min_p, rng, accepted, accepted_cap, err, errlen);
++        if (n) return n;
++    }
++    if (g->fronk_tree) g->fronk_tree->valid = false;
++#endif
+     const uint32_t pos = g->pos;
+     const uint32_t V = DS4_N_VOCAB;
+     const int depth = (exact_sampling && temperature > 0.0f) || getenv("DS4_QWEN4_NO_MTP_BATCH") != NULL
+--- a/ds4_metal.m
++++ b/ds4_metal.m
+@@ -11516,11 +11516,14 @@
+ /* fronk pipeline: the GPU signals when a layer's expert inputs are ready and
+  * waits for the expert sum in a new batch, so the CPU never stops the GPU per
+  * layer. Values grow monotonically for the life of the process. */
+-static id<MTLSharedEvent> g_fronk_event;
++// Independent monotonic timelines: the next branch's ready signal must
++// never satisfy the GPU wait for the previous branch's expert result.
++static id<MTLSharedEvent> g_fronk_event, g_fronk_result_event;
+ int ds4_gpu_fronk_ready(uint64_t value) {
+     if (!g_batch_cb) return 0;
+     if (!g_fronk_event) g_fronk_event = [g_device newSharedEvent];
+-    if (!g_fronk_event) return 0;
++    if (!g_fronk_result_event) g_fronk_result_event = [g_device newSharedEvent];
++    if (!g_fronk_event || !g_fronk_result_event) return 0;
+     ds4_gpu_close_batch_encoder();
+     [g_batch_cb encodeSignalEvent:g_fronk_event value:value];
+     return 1;
+@@ -11539,7 +11542,7 @@
+ static int ds4_gpu_fronk_poll_enabled(void) {
+     if (g_fronk_poll >= 0) return g_fronk_poll;
+     g_fronk_poll = 0;
+-    if (getenv("FRONK_EVENT_RESUME")) return 0;
++    if (getenv("FRONK_EVENT_RESUME") || (getenv("FRONK_MTP_BRANCHES") && atoi(getenv("FRONK_MTP_BRANCHES")) >= 2)) return 0;
+     const NSUInteger region = (NSUInteger)DS4_TP_POLL_LINES * DS4_TP_POLL_LINE_BYTES * DS4_TP_POLL_RING;
+     g_fronk_poll_buffer = [g_device newBufferWithLength:region + DS4_TP_POLL_RING * 2u * sizeof(uint32_t)
+                                                 options:MTLResourceStorageModeShared];
+@@ -11560,7 +11563,7 @@
+     if (!g_batch_cb) return 0;
+     ds4_gpu_timeline_attach(g_batch_cb);
+     if (!ds4_gpu_fronk_poll_enabled()) {
+-        [g_batch_cb encodeWaitForEvent:g_fronk_event value:value];
++        [g_batch_cb encodeWaitForEvent:g_fronk_result_event value:value];
+         return 1;
+     }
+     /* A shallow queue: the firmware chains only what the driver handed it. */
+@@ -11580,6 +11583,7 @@
+     ds4_gpu_end_compute_encoder(g_batch_cb, enc);
+     return 1;
+ }
++uint64_t ds4_gpu_fronk_ready_value(void) { return g_fronk_event.signaledValue; }
+ int ds4_gpu_fronk_wait(uint64_t value, double timeout_ms) {
+     if (!g_fronk_event) return 0;
+     const double until = ds4_gpu_now_ms() + timeout_ms;
+@@ -11595,7 +11599,7 @@
+  * expert sum), which fails the request instead of returning wrong text. */
+ int ds4_gpu_fronk_signal(uint64_t value) {
+     if (g_fronk_poll != 1) {
+-        if (g_fronk_event) g_fronk_event.signaledValue = value;
++        if (g_fronk_result_event) g_fronk_result_event.signaledValue = value;
+         return 1;
+     }
+     const uint32_t slot = (uint32_t)(value % DS4_TP_POLL_RING), v = (uint32_t)value;
+--- a/ds4_gpu.h
++++ b/ds4_gpu.h
+@@ -180,6 +180,7 @@
+ /* fronk expert offload: ready() ends the current encoder and signals `value`
+  * once the GPU reaches this point; resume() commits without waiting and starts
+  * a batch that waits for `value`. wait()/signal() are the CPU side. */
++uint64_t ds4_gpu_fronk_ready_value(void);
+ int ds4_gpu_fronk_ready(uint64_t value);
+ int ds4_gpu_fronk_resume(uint64_t value);
+ int ds4_gpu_fronk_wait(uint64_t value, double timeout_ms);
+--- a/Makefile
++++ b/Makefile
+@@ -1105,3 +1105,6 @@
+ 
+ # The active tokenizer includes generated Unicode classes.
+ ds4.o ds4_cpu.o ds4_cpu_test_hooks.o: ds4_qwen4_unicode.inc
++
++# Fronk experimental scheduler is compiled into every engine variant.
++ds4.o ds4_cpu.o ds4_cpu_test_hooks.o ds4_cuda_test_hooks.o: fronk_mtp_tree.inc fronk_mtp_worker.inc

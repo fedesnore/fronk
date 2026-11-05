@@ -1,0 +1,104 @@
+WEBVTT
+
+00:00:00.400 --> 00:00:05.824
+Can a capable model run on the computers you already own?
+
+00:00:05.824 --> 00:00:10.765
+Qwen3.8-Flash-Next. 125 billion parameters. Open weights. A mixture of experts.
+
+00:00:10.765 --> 00:00:14.294
+Its expert weights alone: 67 GB. The largest memory here: 48.
+
+00:00:14.294 --> 00:00:17.118
+The memory is there. Just in four boxes. (104 GB of installed RAM across four machines.)
+
+00:00:17.118 --> 00:00:22.059
+So cut it. But where? The architectures used today to distribute a model, and where it breaks on mixed machines at home.
+
+00:00:22.059 --> 00:00:28.413
+Existing architecture 1 of 3: pipeline parallelism, cut by layer. One machine works. The others wait. At home: more memory, not more speed.
+
+00:00:28.413 --> 00:00:36.176
+Existing architecture 2 of 3: expert parallelism, cut by expert. The router decides who works. The busiest sets the pace. At home: a slow machine must run a chosen expert whole.
+
+00:00:36.176 --> 00:00:44.647
+Existing architecture 3 of 3: tensor parallelism, cut every matrix. Everyone works at once. But the dense part is cut too: many syncs in every layer. Slow. At home: it needs matched machines on very fast links.
+
+00:00:44.647 --> 00:00:48.882
+Or don’t distribute at all: read it from the SSD? About 1.3 GB of weights for every token. The disk sets the speed.
+
+00:00:48.882 --> 00:00:51.705
+Built for racks of identical machines. Your desk isn’t.
+
+00:00:51.705 --> 00:00:57.353
+But this model has a seam: a dense core (attention, routing; about 5.4 GB plus context) and the experts.
+
+00:00:57.353 --> 00:01:00.176
+For each token, only 10 of 512 experts wake up, in each of 48 layers.
+
+00:01:00.176 --> 00:01:05.117
+The dense core needs one GPU, built with DwarfStar. The experts need memory and a CPU.
+
+00:01:05.117 --> 00:01:10.059
+That’s why Qwen3.8-Flash-Next: capable, open, and split by nature. One dense head; commodity nodes, all different.
+
+00:01:10.059 --> 00:01:15.706
+Don’t split the experts. Split every expert. One expert: 640 neurons. Twenty slices of 32 neurons.
+
+00:01:15.706 --> 00:01:21.352
+The same 32 neurons, in all 512 experts, in all 48 layers: one unit, 3.35 GB. Twenty units: 66.94 GB.
+
+00:01:21.352 --> 00:01:28.413
+Inside an expert, neurons don’t talk. A slice finishes alone. The results just add up.
+
+00:01:28.413 --> 00:01:31.941
+A slice of every expert. On every machine. The plan of 5 November: iMac 11 units, Shuttle 4, M1 Pro 3, the M4 Pro head 1 in RAM and 1 on SSD.
+
+00:01:31.941 --> 00:01:34.765
+Each share comes from measuring the machine. This is the real plan, from the console.
+
+00:01:34.765 --> 00:01:37.588
+One layer, slowed a thousand times. Measured arrivals: head 1.03 ms, M1 Pro 1.31, Shuttle 2.04, iMac 2.28.
+
+00:01:37.588 --> 00:01:40.412
+Request out. Partial sums back. Everyone works on every token.
+
+00:01:40.412 --> 00:01:46.058
+48 rounds, one token. The real report: 15.61 tokens/s, 2.03 ms per layer median, zero deadline misses. Cables matter: separate Thunderbolt ports, or a switch with a faster link to the head.
+
+00:01:46.058 --> 00:01:49.588
+Start on the head. One manager, graphical or terminal.
+
+00:01:49.588 --> 00:01:53.117
+Follow it to each node. It says which machine, and when.
+
+00:01:53.117 --> 00:01:56.647
+Measure before you download: real compute, real network, synthetic weights.
+
+00:01:56.647 --> 00:02:00.176
+Your SSD, or a 177 GB download. Fronk verifies it, slices it, sends each node its share.
+
+00:02:00.176 --> 00:02:05.823
+And ask. Real chat at its original speed: 11 to 12 tokens/s in this response.
+
+00:02:05.823 --> 00:02:10.059
+15.61 tokens per second: a separate warm short test on four different computers, zero deadline misses. Other conversations vary.
+
+00:02:10.059 --> 00:02:14.295
+Stuck? The help ships with Fronk, in docs/llm/. INSTALL.md for setup; NETWORK.md for cables, addresses and discovery; DEBUG.md for an error you can’t explain.
+
+00:02:14.295 --> 00:02:20.529
+Give the brief and the exact error to your frontier model: “Read DEBUG.md. Setup stopped on this node with this error. Help me find the next check.”
+
+00:02:20.529 --> 00:02:24.177
+It can’t plug in your cables. It can find the next check. Keep pairing codes out of the chat.
+
+00:02:24.177 --> 00:02:35.471
+First public version. Off the laboratory table. Its manners still need work. Wanted: new backends, cheaper multi-token verification, SSD weight reuse, many replies through one switch, a clearer installer.
+
+00:02:35.471 --> 00:02:41.117
+Your machines? Share your cluster: machines, cables, result. Failures too. In the console: Report, Save cluster report.
+
+00:02:41.117 --> 00:02:46.921
+It could work! First public release, open source, MIT. Dense engine: DwarfStar/ds4, antirez. Vulkan adapter (experimental): llama.cpp. Weights: Qwen Community License. Music: “Surf Shimmy”, Kevin MacLeod, CC BY 4.0.
+
