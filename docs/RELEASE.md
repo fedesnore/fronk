@@ -26,8 +26,9 @@ be initialized as the public Git repository. Use `configs/head.conf` and
 Review the exported files and notices before the first commit.
 
 The repository already contains issue templates for installation help, cluster
-results and development, a short pull-request template and a Linux/macOS CI
-workflow. At publication, describe the project as “Run a large local model across
+results and development, a short pull-request template and a CI workflow that
+runs on Linux. Hosted macOS runs on request from the Actions tab, so run
+`make DS4= test-core` on a Mac before a release. At publication, describe the project as “Run a large local model across
 heterogeneous computers using neuron-sliced experts.” Link the README, keep
 Issues enabled and attach the managers, source archive, checksums and verification
 report to one tagged prerelease. Use [0.3.0.md](releases/0.3.0.md) as the release

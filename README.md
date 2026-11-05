@@ -65,6 +65,7 @@ model fits and the estimated speed, before you download anything.
 Codex or Claude Code on the computer with the best GPU and paste the whole of
 [`docs/llm/SETUP.md`](docs/llm/SETUP.md). It opens SSH to your computers, connects them,
 installs Fronk and checks a real chat. It asks only for what needs your hands or your yes.
+You need no networking skills: just read [how to connect the computers physically](docs/NETWORK.md#choose-the-physical-layout).
 
 **Comfortable with terminals and IP addresses?** Follow the steps below, or the
 [complete procedure with commands](docs/INSTALL.md#advanced-the-complete-procedure-with-commands).
