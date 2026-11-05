@@ -74,24 +74,31 @@ The [protocol guide](PROTOCOL.md) explains control/data traffic and default port
 
 ## 1. Open the manager on the head
 
-Download `fronk-manager-macos.zip`, `fronk-manager-linux.tar.gz`, or the portable
-`fronk-manager.sh` from the project's release assets. Check `SHA256SUMS` from
-the same release:
+**Use the terminal if you can.** It is the recommended, more robust path, with more
+of its failure, upgrade and uninstall cases tested. The graphical manager runs the
+same steps, but it is experimental. If it misbehaves, run the terminal command from
+the same step: finished work is kept.
+
+Download the portable `fronk-manager.sh` from the project's release assets, or
+`fronk-manager-macos.zip` or `fronk-manager-linux.tar.gz` for the graphical manager.
+Check `SHA256SUMS` from the same release:
 
 ```sh
-shasum -a 256 fronk-manager-macos.zip      # macOS
-sha256sum fronk-manager-linux.tar.gz      # Linux
+shasum -a 256 fronk-manager.sh             # macOS
+sha256sum fronk-manager.sh                 # Linux
 ```
 
 Compare the result with the release checksum. The macOS app is not notarized;
 if macOS blocks it, use the per-app **Open Anyway** action in Privacy & Security
 only after checking the source/checksum. Do not disable Gatekeeper globally.
 
-Extract the graphical archive and open the manager. The terminal equivalent is:
+Start the manager:
 
 ```sh
 bash fronk-manager.sh --terminal
 ```
+
+For the experimental graphical manager, extract the archive and open it instead.
 
 Choose **head**. Installation is per-user in `~/fronk`; a dedicated custom
 absolute prefix is supported with `--prefix`. Prefixes cannot contain spaces.

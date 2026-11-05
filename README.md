@@ -53,7 +53,7 @@ design, the measurements and where each part lives in the code.
 | **Memory** | About 67 GB available across all the machines, plus about 10 GB the head keeps for itself. Apple Silicon can also place a measured share on SSD |
 | **Disk** | Head: the 177.28 GB model file and up to 66.94 GB of prepared slices. Each node: 3.35 GB per slice it receives |
 | **Network** | A trusted local IPv4 network. Best: a Thunderbolt cable to a separate head port for each node, or a switch with a faster link to the head. Wi-Fi works, with less predictable latency |
-| **Tools** | A C compiler, `make` and Python 3.9 or newer on every machine; Tk for the graphical manager |
+| **Tools** | A C compiler, `make` and Python 3.9 or newer on every machine; Tk only for the experimental graphical manager |
 
 Windows is not supported. You do not need to work this out in advance: a
 **synthetic demo** tests your real machines and cables, and reports whether the
@@ -61,14 +61,16 @@ model fits and the estimated speed, before you download anything.
 
 ## Install
 
-Download a manager from the repository's **Releases** page and use the same
-download on every computer:
+Download a manager from the [Releases page](https://github.com/fedesnore/fronk/releases/tag/v0.3.0)
+and use the same way on every computer. **The terminal is the recommended, more
+robust path.** The graphical manager runs the same steps but is experimental: it
+has had less testing, so switch to the terminal if it misbehaves.
 
-| Download | Open it |
-|---|---|
-| `fronk-manager-macos.zip` | Extract and open **Fronk Installer Manager.app** (not notarized: see [the guide](docs/INSTALL.md#1-open-the-manager-on-the-head)) |
-| `fronk-manager-linux.tar.gz` | Extract and run **Fronk Setup** |
-| `fronk-manager.sh` | Run `bash fronk-manager.sh --terminal` |
+| Download | Open it | Status |
+|---|---|---|
+| `fronk-manager.sh` | Run `bash fronk-manager.sh --terminal` | **Recommended** |
+| `fronk-manager-macos.zip` | Extract and open **Fronk Installer Manager.app** (not notarized: see [the guide](docs/INSTALL.md#1-open-the-manager-on-the-head)) | Experimental |
+| `fronk-manager-linux.tar.gz` | Extract and run **Fronk Setup** | Experimental |
 
 1. **Start on the head.** Choose **Head** and the number of node computers.
 2. **Visit each node when asked.** Open the manager, choose **Node**, select the

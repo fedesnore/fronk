@@ -4,7 +4,8 @@
 > [how to use this brief](README.md). Model: also follow [AGENTS.md](../../AGENTS.md).
 > If you cannot open a linked file, ask for it; do not guess.
 
-Use the same commands as the graphical/terminal manager. Read
+Prefer the terminal manager: it is the recommended path and the graphical manager
+is experimental. Both use the same commands. Read
 [INSTALL.md](../INSTALL.md), [NETWORK.md](../NETWORK.md), [MODEL.md](../MODEL.md)
 and `tools/install/fronk-install.sh`, `onboard.sh`, `service.sh`, `model.conf`.
 For a new physical cluster, start with [NETWORK.md](NETWORK.md) in this directory.
