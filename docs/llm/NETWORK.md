@@ -52,7 +52,8 @@ Start the head installer. Let the user select a node count and assigned names.
 Guide node 1 through role/name/private pairing/backend/service, then return to
 the head for Verify. Repeat, and check all intended nodes together. Pairing
 secrets stay in private prompts/local state; do not put them in this conversation,
-command arguments or logs. SSH is optional, not an installation prerequisite.
+command arguments or logs. A person following the guide by hand does not need SSH;
+when you drive setup, work from the head over SSH as [SETUP.md](SETUP.md) describes.
 
 Run the synthetic demo before any large download. Explain compute, communication,
 capacity and whether all 20 units fit. A component estimate is not actual tok/s.

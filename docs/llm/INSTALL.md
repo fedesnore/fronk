@@ -74,9 +74,9 @@ weights to mask a failure.
 ## Drive the installation without a terminal
 
 Every step below asks nothing. Use it when your commands have no terminal: a question
-then stops with `no terminal is attached` and names what to pass. SSH is optional: use
-it only on hosts the person named and already opened or approved, and never ask for
-passwords or keys. Say which computer each command changes before running it.
+then stops with `no terminal is attached` and names what to pass. Work from the head over
+SSH, on hosts the person named and approved; [SETUP.md](SETUP.md) shows how to open it. Never
+ask for passwords or keys. Say which computer each command changes before running it.
 
 ```sh
 # Head: installs, measures, creates the pairing secret. Nodes come next.

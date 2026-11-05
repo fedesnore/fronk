@@ -224,8 +224,8 @@ its sessions. Reconnect reuses verified unit files and compatible measurements.
 ## Install with a coding agent
 
 The terminal manager lets a coding agent carry the whole installation, because every
-step has a command that asks nothing. If you enable SSH to your nodes, it can also
-work on each of them from the head.
+step has a command that asks nothing. The agent works from the head and opens SSH to each
+node, to send it the software and check its connections.
 
 Open Codex or Claude Code on the head and paste the whole of
 [`docs/llm/SETUP.md`](llm/SETUP.md). You do not need to know networking: the agent plans
@@ -233,9 +233,9 @@ the connections, shows you each change and tells you which cable to plug in.
 
 Stay close, because two things remain yours:
 
-- **Your access.** Open or approve the SSH connections yourself. Do not give the
-  agent passwords or private keys. The agent pipes the pairing code to each node, so
-  it does not need to read it.
+- **Your access.** Enable Remote Login on each node, and type each computer's password
+  yourself in the one command the agent gives you. Never give the agent a password. It
+  pipes the pairing code to each node, so it does not need to read it.
 - **Local Network on each Mac node.** Log in on that Mac and accept the permission on
   its screen when it appears. The agent installs the node as a service: a node started
   by hand over SSH and left behind can lose this permission and fail to reply.
