@@ -1,7 +1,11 @@
 # Install a Fronk cluster
 
-**Prefer not to do this by hand?** Paste [`docs/llm/SETUP.md`](llm/SETUP.md) into Codex or
-Claude Code on the head. It takes care of the network too.
+**Not an expert in networking? [Use a frontier model](#install-with-a-coding-agent): this is
+the preferred way.** Paste [`docs/llm/SETUP.md`](llm/SETUP.md) into Codex or Claude Code on the
+head, and it takes care of the network too.
+
+Advanced users can follow the steps below, or the
+[complete procedure with commands](#advanced-the-complete-procedure-with-commands).
 
 Begin on the **head**, which runs the dense part of the model on its GPU and
 coordinates chat. Keep its manager open while visiting the nodes. A **node**
@@ -241,6 +245,42 @@ Stay close, because two things remain yours:
   by hand over SSH and left behind can lose this permission and fail to reply.
 
 SSH is only for setup. The cluster uses Fronk's own connections while it runs.
+
+## Advanced: the complete procedure with commands
+
+This is the whole setup with commands that ask nothing, for people who manage their own
+network. It assumes every node is reachable: set up cables and addresses with
+[the network guide](NETWORK.md) first. Replace `node-1 node-2`, `HOST` and the model path.
+
+```sh
+# On the head: install, measure and create the pairing secret
+bash fronk-manager.sh --yes --role head
+
+# Copy the manager to each node
+scp fronk-manager.sh HOST:
+
+# On the head, for each node: install it and pass the pairing code through the pipe
+~/fronk/bin/fronk-manager --pairing-code |
+  ssh HOST 'bash fronk-manager.sh --yes --role node --name node-1 --secret-stdin'
+
+# On the head: verify all the nodes and run the synthetic demo
+~/fronk/bin/fronk-manager --join-nodes --yes --nodes 'node-1 node-2'
+
+# On the head: verify the exact model. Or use --download --download-dir FOLDER
+~/fronk/bin/fronk-manager --configure-model --yes --model /path/to/Qwen3.8-Flash-Next-Q4.gguf
+
+# On the head: start. In a terminal, this shows the plan and asks you to proceed
+~/fronk/bin/fronk-manager --run
+
+# On the head: check the API from another terminal
+python3 ~/fronk/src/tools/api-check.py
+```
+
+Without SSH, run the node step on each node and enter the code at its private prompt:
+`bash fronk-manager.sh --terminal --role node --name node-1`. A Mac node runs as a
+LaunchAgent, so its user must be logged in and accept **Local Network** on its screen.
+On Linux without a systemd user session, add `--no-service` and run `~/fronk/bin/fronk-node`.
+`bash fronk-manager.sh --help` lists every option.
 
 ## Upgrade, uninstall and start fresh
 

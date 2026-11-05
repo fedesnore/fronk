@@ -1,6 +1,6 @@
 # Connect the head and nodes
 
-**You do not need to learn this to use Fronk.** Paste [`docs/llm/SETUP.md`](llm/SETUP.md) into
+**Not an expert in networking? You do not need this guide.** Paste [`docs/llm/SETUP.md`](llm/SETUP.md) into
 Codex or Claude Code and it plans and applies the network with you. This guide is for doing
 it by hand.
 
