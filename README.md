@@ -80,7 +80,10 @@ has had less testing, so switch to the terminal if it misbehaves.
    the exact file. Fronk verifies it and sends each node its slices.
 5. **Start chat.** Review the plan, choose **Proceed**, and wait for the checks.
 
-SSH is not required. Read the [checklist before you begin](docs/INSTALL.md#what-to-have-ready)
+SSH is not required, but it is the easiest way to let a coding agent take the install
+to the end for you: it works through the terminal manager, one computer at a time.
+See [install with a coding agent](docs/INSTALL.md#install-with-a-coding-agent).
+Read the [checklist before you begin](docs/INSTALL.md#what-to-have-ready)
 and, if cables and IP addresses are new to you, [how to connect the computers](docs/NETWORK.md).
 The [installation guide](docs/INSTALL.md) covers each screen, upgrades and uninstalling.
 

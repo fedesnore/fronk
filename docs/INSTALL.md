@@ -218,6 +218,33 @@ Use one head per installation/cluster. The console can follow a head started
 from the terminal; the state-directory lock prevents a second head from resetting
 its sessions. Reconnect reuses verified unit files and compatible measurements.
 
+## Install with a coding agent
+
+The terminal manager lets a coding agent carry the whole installation, because it
+can run every step as a command. If you enable SSH to your nodes, it can also work
+on each of them from the head.
+
+Open the agent on the head, in the folder holding `fronk-manager.sh` or a clone of
+this repository, and ask:
+
+```text
+Read docs/llm/INSTALL.md and install Fronk with the terminal manager. This computer
+is the head; the nodes are [names and SSH hosts]. Ask me before each change, and
+leave pairing codes and passwords for me to type.
+```
+
+Stay close, because three things remain yours:
+
+- **Your access.** Open or approve the SSH connections yourself. Do not give the
+  agent passwords or private keys.
+- **The pairing code.** Run the node step in a real terminal session, such as
+  `ssh -t`, and type the code into the private prompt yourself.
+- **Local Network on each Mac node.** Accept the permission on that Mac's screen when
+  it appears. Install the node as its service: a node started by hand over SSH and
+  left behind can lose this permission and fail to reply.
+
+SSH is only for setup. The cluster uses Fronk's own connections while it runs.
+
 ## Upgrade, uninstall and start fresh
 
 Stop the head before changing its installation. On each machine, reopen the

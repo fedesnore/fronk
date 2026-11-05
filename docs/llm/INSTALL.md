@@ -71,6 +71,21 @@ hash checks, numerical tests, all-node completion or the download demo gate to
 make a setup screen green. Do not change power/thermal protections or delete
 weights to mask a failure.
 
+## Drive the installation over SSH
+
+Use the terminal manager with explicit flags. SSH is optional: use it only on hosts
+the person named and already opened or approved, and never ask for passwords or keys.
+Name the computer for each command, and ask before changing a machine.
+
+- Node install: `ssh -t HOST 'bash fronk-manager.sh --terminal --role node --name NAME'`,
+  so the person types the pairing code into the private prompt. Never read, print or
+  pass the code as an argument.
+- Mac nodes must run as the installed LaunchAgent, not `--no-service` or `nohup` from
+  SSH: a process left behind by a closed SSH session can fail with `EPIPE` or
+  `No route to host` on replies. Ask the person to accept Local Network on that screen.
+- Runtime traffic uses Fronk's own protocols, so the cluster must not depend on SSH.
+- Return to the head and run Verify after each node, then continue the workflow above.
+
 ## Maintenance and recovery
 
 Use manager upgrade/uninstall actions. Stop the owned head before changing its
