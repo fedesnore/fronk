@@ -107,6 +107,12 @@ permission. A process started through SSH may have a different permission
 context from the authorized Terminal or installed service. Restart through the
 intended user workflow and repeat the demo. Ping alone cannot validate this.
 
+**The context selector disagrees with a 4096-token Vulkan setup.** Consoles newer
+than v0.3.0 include 4K and read the saved `state/ds4-ctx`. The v0.3.0 console
+offered 8K as its smallest option even when the engine used 4K. Use a newer
+release; changing a selector does not establish active GPU
+memory use. Check the engine log and restart intentionally.
+
 **Storage is rejected or a unit cannot be received.** Use a persistent disk.
 Linux `/tmp` may be RAM-backed. The installer checks this and the node checks
 space again before each unit. A unit is about 3.35 GB; receiving a replacement

@@ -255,7 +255,7 @@ document.querySelectorAll('nav .tabs button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('.v').forEach(v=>v.hidden=v.id!==b.dataset.v);});
 async function post(p,body){
   try{const r=await fetch(p,{method:'POST',headers:{'X-Fronk-Token':T,'Content-Type':'application/json'},body:JSON.stringify(body)});
-    const j=await r.json();note(j.message||'',/first|cannot|must|not |wait/.test(j.message||''));return j;}
+    const j=await r.json();note(j.message||'',!r.ok||/first|cannot|must|not |wait/.test(j.message||''));return j;}
   catch(e){note('The console is not reachable: is tools/fronk-web.py still running?',true);return {};}}
 function note(t,err){const e=$('note');e.textContent=t;e.classList.toggle('err',!!err);}
 let helpText='';
