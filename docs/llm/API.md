@@ -10,8 +10,12 @@ machine runs the client's HTTP backend. Default model endpoint:
 configured control port + 10. Wait for Ready; GET `/v1/models` supplies the ID.
 
 Try model discovery and one short Chat Completions request from the same
-environment as the client. Use `think:false`, `max_tokens:64`, and a harmless
-prompt on the qualified Metal head. Then exercise SSE and its final usage;
+environment as the client. Use `think:false` on the native Metal head, and
+`chat_template_kwargs: {"enable_thinking": false}` on llama.cpp Vulkan, with
+`max_tokens:64` and a harmless prompt. Supplying both is convenient for this
+example. The v0.3.0 bundled API checker can pass on Vulkan while emitting
+reasoning tokens; do not equate content being present with thinking disabled.
+Then exercise SSE and its final usage;
 do not count chunks as tokens. `tools/api-check.py --tool-test` additionally
 checks a validated arithmetic function call, its tool result and follow-up.
 

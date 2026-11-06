@@ -241,10 +241,17 @@ computation uses the same FP16-rounded activations as remote nodes. The ordinary
 head requires all assigned replies and drains submitted work on error; partial
 sums must not be returned as successful generation.
 
-There is no per-layer retransmission mechanism. A lost fragment can invalidate
-its datagram and cause the layer deadline to fail. Diagnostics distinguish
-invalid, late, duplicate and missing data. Keep the finite deadline and clear
-error behavior when experimenting with another transport.
+There is no per-fragment acknowledgment or retransmission in the UDP plane.
+A lost fragment can leave a request or reply incomplete at its deadline. The
+ordinary generation path in `src/serve.c` waits up to 500 ms for a complete sum;
+if a participant is missing, it retries the **whole expert call once**, with a
+new step ID and a 1 s deadline. The new step excludes late packets from the
+first attempt and replaces the entire sum; it does not add a duplicate result.
+If the retry is still incomplete, generation fails instead of using a partial
+sum. The synthetic demo reports missing replies as a failure, without this
+generation retry. Diagnostics distinguish invalid, late, duplicate and missing
+data. Keep these finite deadlines and clear error behavior when experimenting
+with another transport; they are not a guarantee of UDP delivery.
 
 ## What reduces transport overhead today
 
@@ -295,10 +302,14 @@ an observed interval/residual, not a hardware timestamp of cable transit.
   receive scheduling and communication. Concurrent nodes' arrival times overlap;
   adding them invents latency.
 - **Deadline misses** mean a required result did not arrive in time. The ordinary
-  release requires every assigned participant and fails generation on a missing
-  result; legacy partial-sum diagnostic settings are not the release policy.
+  release requires every assigned participant and fails generation if a result
+  is still missing after its one whole-call retry; legacy partial-sum diagnostic
+  settings are not the release policy.
 - **Invalid/late/duplicate** counters distinguish rejected input from useful
   work. A TCP `PING` success does not prove that the UDP data path is healthy.
+- `request_gaps` counts gaps in received step IDs, not lost IP packets. The
+  transition from self-test to generation can itself skip IDs; compare a delta
+  within the same phase with head misses/retries before inferring network loss.
 - Compare the same **width, placement, context, output and acceptance rate**.
   A faster packet microbenchmark is not automatically faster chat.
 

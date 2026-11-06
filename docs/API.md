@@ -41,7 +41,7 @@ Then ask for a short answer:
 ```sh
 curl --fail --silent --show-error http://127.0.0.1:7710/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"qwen3.8-flash-next","think":false,"max_tokens":64,"messages":[{"role":"user","content":"Explain what a network is in one sentence."}]}'
+  -d '{"model":"qwen3.8-flash-next","think":false,"chat_template_kwargs":{"enable_thinking":false},"max_tokens":64,"messages":[{"role":"user","content":"Explain what a network is in one sentence."}]}'
 ```
 
 For streaming, add `"stream":true` and `"stream_options":{"include_usage":true}`
@@ -50,7 +50,12 @@ to the JSON and `--no-buffer` to curl. Content arrives in
 by `data: [DONE]`. An SSE fragment is not necessarily one token.
 
 The native Metal adapter accepts `think:false` to disable reasoning for a quick
-first test. If your client supports extra request fields, put it there. Do not
+first test. The llama.cpp Vulkan adapter instead uses
+`chat_template_kwargs: {"enable_thinking": false}`. The example supplies both
+fields; put the appropriate field in your client's extra request parameters.
+The v0.3.0 bundled API-check example supplies only `think:false`: it can pass
+on the Vulkan head while still generating reasoning tokens. A passing short
+answer does not prove reasoning was disabled. Do not
 assume that every field supported by a hosted provider has the same meaning
 here. This guide qualifies Chat Completions, not every provider API.
 

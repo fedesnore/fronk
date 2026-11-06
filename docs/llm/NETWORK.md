@@ -46,6 +46,18 @@ Use the platform's existing network manager. On Linux inspect `ip -br address`,
 Adapt commands to observed interfaces. Do not install a second network manager,
 disable firewalls/VPNs globally or expose ports through the Internet router.
 
+For a lasting macOS setup, use the network service's persistent manual settings
+(`networksetup -setmanual`, with the actual service name); a temporary interface
+alias disappears at reboot. Record `networksetup -getinfo` first and specify the
+rollback. See the [macOS example](../NETWORK.md#macos-configure-each-end). If
+multicast join fails, inspect the normal unicast fallback and run the complete
+checks before diagnosing lost inference traffic. If a refresh warning precedes
+a first-layer timeout after a long extraction, record the initial selected path,
+then use the console's documented `m` action to re-run CONNECTION without
+purging verified units. Distinguish recovery by automatic unicast selection
+from a confirmed multicast/IGMP fix. Require self-test, generation and an idle
+recheck; do not claim that a short initial multicast probe proves persistence.
+
 ## Drive setup to completion
 
 Start the head installer. Let the user select a node count and assigned names.

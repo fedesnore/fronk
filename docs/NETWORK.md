@@ -101,6 +101,27 @@ On node 1, test `192.168.50.1` instead. For Thunderbolt use that subnet's actual
 addresses. A successful ping checks basic reachability, not the Fronk password,
 UDP permissions or application-sized latency.
 
+For an isolated Ethernet link without DHCP, an administrator can apply the
+same persistent settings from Terminal. First identify the **network service
+name**, which differs from the interface name (`en9`, for example), and record
+its old configuration:
+
+```sh
+networksetup -listallnetworkservices
+networksetup -getinfo "USB 10/100/1000 LAN"
+# Example node 1; choose a free address on your actual cluster subnet.
+sudo networksetup -setmanual "USB 10/100/1000 LAN" 192.168.50.2 255.255.255.0 0.0.0.0
+networksetup -getinfo "USB 10/100/1000 LAN"
+```
+
+`0.0.0.0` leaves this isolated service without a gateway. Keep the Wi-Fi/other
+Internet route intact. If this service previously used DHCP, its rollback is
+`sudo networksetup -setdhcp "USB 10/100/1000 LAN"`; otherwise restore the recorded
+manual settings. A temporary `ifconfig ... alias` is useful for a short test,
+but is not a reproducible setup across a reboot. Check reachability again after
+reboot. These are OS administration commands, not actions of the Fronk manager
+or SSH wrapper.
+
 ## Linux: configure the cluster interface
 
 In the desktop network settings, choose the **wired** interface connected to the
@@ -165,5 +186,18 @@ The [protocol guide](PROTOCOL.md) lists ports and security boundaries precisely.
 If a node is missing, check power, its running service, unique name, matching
 pairing code, IPv4 address/mask, route and local-network/firewall permission.
 If it is slow, inspect link speed and Fronk's per-node compute/arrival timings.
+If multicast cannot join an interface but the normal path report selects
+unicast there, verify the full demo and generation on that selected path.
+Multicast failure alone does not prove that unicast traffic is being lost.
+
+A successful multicast probe before a long model extraction does not prove the
+path will remain usable. If the node logs `multicast refresh failed` and the
+head later stops at `SELFTEST warm-up failed`, save both logs and use the
+console's **modified** (`m`) action to repeat CONNECTION. This retains verified
+units and calibration and may select unicast when multicast no longer replies.
+Require the numerical check, generation, and a chat after an idle interval to
+pass on the new path. This recovered the documented mixed-cluster test; it is
+not a fix for the underlying multicast refresh failure. A repeated failure
+needs the node's dataplane counters, route and switch/IGMP investigation.
 VPNs, USB adapters, shared switch uplinks, memory pressure and competing CPU
 work are distinct possible costs; measure before changing several at once.
