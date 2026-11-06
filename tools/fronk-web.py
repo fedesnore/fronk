@@ -7,7 +7,7 @@ would ([p]roceed, [m]odified, [r]eport, [q]uit). Binds 127.0.0.1 only; every
 POST needs the per-start token embedded in the page. The shared secret is
 kept in this process's memory (environment or the form), never written.
 """
-import fcntl, html, json, math, os, re, secrets, signal, subprocess, sys, threading, time, urllib.parse, urllib.request
+import fcntl, html, ipaddress, json, math, os, re, secrets, signal, subprocess, sys, tempfile, threading, time, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fronk_chats, fronk_files, fronk_report  # noqa: E402 - local UI helpers
@@ -20,6 +20,7 @@ STATE = {"proc": None, "lines": [], "secret": os.environ.get("FRONK_SECRET", "")
          "auto": True}  # auto: answer Proceed when the plan fits
 FOLLOW_LOG = None
 LOCK = threading.Lock()
+CONTROL_LOCK = threading.Lock()  # serialize configuration changes and head lifecycle
 PROMPT = re.compile(rb"\[[a-z]\][a-z]*( \([^)]*\))?: $")
 EDITABLE = ("model", "burst", "ds4", "interfaces", "state-dir", "head-blocks")
 # SSH aliases belong only to the development checkout. An upgraded install
@@ -90,25 +91,76 @@ def saved_secret():
 
 def conf_read():
     values = {}
-    for line in open(CONF):
-        parts = line.split()
-        if len(parts) == 2 and not line.startswith("#"):
+    with open(CONF) as f:
+        lines = f.readlines()
+    for line in lines:
+        parts = line.split("#", 1)[0].split()
+        if len(parts) == 2:
             values[parts[0]] = parts[1]
     return values
 
 
 def conf_write(updates):
     out, seen = [], set()
-    for line in open(CONF):
-        parts = line.split()
-        if len(parts) == 2 and parts[0] in updates and not line.startswith("#"):
+    with open(CONF) as f:
+        lines = f.readlines()
+    for line in lines:
+        parts = line.split("#", 1)[0].split()
+        if len(parts) == 2 and parts[0] in updates:
             seen.add(parts[0])
             if updates[parts[0]]:
                 out.append(f"{parts[0]} {updates[parts[0]]}\n")
             continue
         out.append(line)
     out += [f"{k} {v}\n" for k, v in updates.items() if k not in seen and v]
-    open(CONF, "w").writelines(out)
+    # A failed write must leave the previous usable configuration intact.
+    with tempfile.NamedTemporaryFile(mode="w", dir=os.path.dirname(CONF), delete=False) as f:
+        path = f.name
+        try:
+            os.chmod(path, os.stat(CONF).st_mode & 0o777)
+            f.writelines(line if line.endswith("\n") else line + "\n" for line in out)
+            f.flush()
+            os.replace(path, CONF)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+
+def setting_value(key, value):
+    """Reject invalid form values before changing any configuration or secret."""
+    if type(value) not in (str, int):
+        raise ValueError(f"{key}: use text or an integer")
+    value = str(value).strip()
+    if re.search(r"[\s#\x00-\x1f\x7f]", value):
+        raise ValueError(f"{key}: spaces, comments and control characters are not allowed; use the manager for model paths")
+    if key in ("head-blocks", "burst") and value:
+        low, high = (0, 20) if key == "head-blocks" else (1, 4)
+        if not re.fullmatch(r"[0-9]+", value) or not low <= int(value) <= high:
+            raise ValueError(f"{key}: must be {low}-{high}")
+    if key == "state-dir" and not value:
+        raise ValueError("state-dir: cannot be empty")
+    if key == "interfaces" and value and value != "auto":
+        addresses = value.split(",")
+        if len(addresses) > 8:
+            raise ValueError("interfaces: at most 8 IPv4 addresses")
+        for address in addresses:
+            try:
+                ip = ipaddress.IPv4Address(address)
+            except ipaddress.AddressValueError:
+                raise ValueError("interfaces: use auto or comma-separated IPv4 addresses") from None
+            if ip.is_unspecified or ip.is_multicast or str(ip) == "255.255.255.255":
+                raise ValueError("interfaces: use local unicast IPv4 addresses")
+    return value
+
+
+def failure_of(lines):
+    errors = [line for line in lines if
+              re.match(r"(fronk|connection|discovery|selection|plane|serve): ", line)
+              and not line.startswith("fronk: backend ")
+              and "; unicast on this interface" not in line
+              or line.startswith("SELFTEST ") and re.search(r"failed|mismatch", line)]
+    # A concrete error beats the generic cycle message, which is the last resort.
+    return next((line for line in reversed(errors) if "cycle" not in line), errors[-1] if errors else "")
 
 
 def reader(proc):
@@ -206,6 +258,7 @@ def stop_head():
         proc.wait(timeout=15)
     except subprocess.TimeoutExpired:
         proc.kill()
+        proc.wait()
     return "head stopped"
 
 
@@ -491,7 +544,7 @@ CHAT_PAGE = os.path.join(ROOT, "tools", "fronk-chat.html")
 # ds4's memory by context size, from its own load-time plans on this Mac: 8.30 GiB
 # at 10240 tokens, 9.02 GiB at 32768; the KV cache grows linearly in between.
 DS4_FIXED_GIB, DS4_KV_GIB_PER_TOKEN = 7.97, 0.72 / 22528
-CTX_SIZES = (8192, 16384, 32768, 49152, 65536, 98304, 131072)
+CTX_SIZES = (4096, 8192, 16384, 32768, 49152, 65536, 98304, 131072)
 BLOCK_GB = 3.347  # one expert block (FR_NATIVE_BLOCK_BYTES)
 
 
@@ -503,11 +556,13 @@ def context_sizes():
     """Each context size with the memory ds4 needs for it on this Mac, against the
     head's default 10 GB reserve for ds4: what fits, and what costs expert blocks
     (choosing more raises head-reserve-gb, so the head plans fewer blocks here)."""
+    gpu = conf_read().get("ds4") == "tools/gpu-head/run.sh"
     try:
-        current = int(open(ctx_file()).read())
+        with open(ctx_file()) as f:
+            current = int(f.read())
     except (OSError, ValueError):
-        current = 32768
-    if conf_read().get("ds4") == "tools/gpu-head/run.sh":
+        current = 8192 if gpu else 32768
+    if gpu:
         return {"engine": "llama.cpp Vulkan", "current": current, "sizes": [{"ctx": n} for n in CTX_SIZES]}
     sizes = []
     for n in CTX_SIZES:
@@ -593,12 +648,11 @@ class Handler(BaseHTTPRequestHandler):
                     v["generation_progress"] = chat_progress()
                 if v["phase"] != STATE["phase"]:
                     STATE["phase"], STATE["phase_t"] = v["phase"], now
-                errors = [l for l in lines if re.match(r"(fronk|connection|discovery|selection|plane|serve): ", l)]
                 live = {"observer": bool(FOLLOW_LOG), "head_name": os.uname().nodename.split(".")[0], "keys": STATE["keys"], "auto": STATE["auto"], "running": bool(terminal_head_pid()) if FOLLOW_LOG else bool(STATE["proc"] and STATE["proc"].poll() is None),
                         "elapsed": round(now - STATE["started"]) if STATE["started"] else 0,
                         "phase_age": round(now - STATE["phase_t"]) if STATE["phase_t"] else 0,
                         "activity": STATE["activity"], "activity_age": round(now - STATE["activity_t"]) if STATE["activity_t"] else 0,
-                        "failure": next((l for l in reversed(errors) if "cycle" not in l), errors[-1] if errors else ""),
+                        "failure": failure_of(lines),
                         "lastline": next((l for l in reversed(lines) if l.strip() and not l.startswith("[nodes]")), "")}
             return self.reply(200, json.dumps(dict(v, **live)))
         m = re.match(r"/log\?since=(\d+)$", self.path)
@@ -611,6 +665,12 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(404, "{}")
 
     def do_POST(self):
+        if self.path in ("/start", "/stop", "/settings", "/api/context-size"):
+            with CONTROL_LOCK:
+                return self.post_request()
+        return self.post_request()
+
+    def post_request(self):
         if FOLLOW_LOG:
             return self.reply(409, json.dumps({"message": "This head is controlled by its terminal."}))
         if self.headers.get("X-Fronk-Token") != TOKEN:
@@ -633,10 +693,12 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/start":
             if head_running() or terminal_head_pid():
                 return self.reply(409, json.dumps({"message": "A head or setup check is already running on this machine."}))
-            hb = str(body.get("head_blocks", "")).strip()
-            if hb and not (hb.isdigit() and int(hb) <= 20):
-                return self.reply(200, json.dumps({"message": "blocks on this Mac must be 0-20"}))
-            conf_write({"head-blocks": hb})  # empty removes the line: size from free memory
+            if "head_blocks" in body:
+                try:
+                    hb = setting_value("head-blocks", body["head_blocks"])
+                except ValueError as error:
+                    return self.reply(400, json.dumps({"message": str(error)}))
+                conf_write({"head-blocks": hb})  # explicit empty: size from free memory
             return self.reply(200, json.dumps({"message": start_head(bool(body.get("refresh")))}))
         if self.path == "/auto":
             with LOCK:
@@ -649,17 +711,28 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/key" and body.get("key") in ("p", "m", "r", "q"):
             return self.reply(200, json.dumps({"message": send_key(body["key"])}))
         if self.path == "/settings":
+            if head_running() or terminal_head_pid():
+                return self.reply(409, json.dumps({"message": "Stop the head before changing settings."}))
+            try:
+                updates = {k: setting_value(k, v) for k, v in body.items() if k in EDITABLE}
+                if "secret" in body and (not isinstance(body["secret"], str) or re.search(r"[\r\n\x00]", body["secret"])):
+                    raise ValueError("secret: expected a single line of text")
+            except ValueError as error:
+                return self.reply(400, json.dumps({"message": str(error)}))
+            conf_write(updates)
             if body.get("secret"):
-                STATE["secret"] = body.pop("secret")
-            conf_write({k: str(v) for k, v in body.items() if k in EDITABLE and re.fullmatch(r"[^\s]*", str(v))})
+                STATE["secret"] = body["secret"]
             return self.reply(200, json.dumps({"message": "settings saved to fronk.conf"}))
         if self.path == "/api/context-size":  # saved for ds4-head.sh; a running head restarts with it
+            if not head_running() and terminal_head_pid():
+                return self.reply(409, json.dumps({"message": "Stop the terminal head before changing its context."}))
             n = int(body.get("ctx", 0)) if str(body.get("ctx", "")).isdigit() else 0
             if n not in CTX_SIZES:
                 return self.reply(400, json.dumps({"message": "unknown context size"}))
             gb = (DS4_FIXED_GIB + DS4_KV_GIB_PER_TOKEN * n) * 1.073741824
             os.makedirs(os.path.dirname(ctx_file()), exist_ok=True)
-            open(ctx_file(), "w").write(f"{n}\n")
+            with open(ctx_file(), "w") as f:
+                f.write(f"{n}\n")
             # Above the default 10 GB the head keeps more for ds4, so fewer expert blocks here.
             if conf_read().get("ds4") != "tools/gpu-head/run.sh":
                 conf_write({"head-reserve-gb": f"{math.ceil(gb * 10) / 10 + 0.2:.1f}" if gb > 10.0 else ""})

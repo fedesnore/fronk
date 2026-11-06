@@ -121,6 +121,16 @@ Finish with a real answer: a build, demo or `/v1/models` response is not a finis
 
 ## Maintenance and recovery
 
+After v0.3.0, the console preserves `head-blocks` when `/start` omits `head_blocks`;
+only an explicit empty string requests automatic placement. Invalid settings
+return HTTP 400 without partial changes; stop the head before saving settings
+(HTTP 409 otherwise). Configure model paths containing spaces through the manager,
+which verifies them and links them into state. Do not write a whitespace path
+directly into `fronk.conf`. Context options include the installer's 4096 tokens;
+the saved size is distinct from the active engine's context until restart.
+The failure field reports a SELFTEST failure rather than a backend startup line;
+ordinary fallback to unicast is not itself an inference failure.
+
 Use manager upgrade/uninstall actions. Stop the owned head before changing its
 installation; honor its lock. Explain keep-state versus `--purge`: purging removes
 managed state/pairing and requires re-pairing, while model files are preserved.

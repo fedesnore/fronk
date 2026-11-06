@@ -209,7 +209,8 @@ On the head, choose **start**. In the Run view, review the actual placement and
 choose **Proceed**. Fronk transfers missing units, checks their hashes, starts
 sessions and performs a real generation check. Leave the nodes running.
 
-The console is at `http://127.0.0.1:7730` on the head with the default ports.
+The console is at `http://127.0.0.1:7730` on the head with the default ports;
+chat is at `http://127.0.0.1:7730/chat`. These addresses are local to the head.
 The local model API is at port 7710. Use the chat link in the console. Both GUI
 and terminal starts use the ordinary runtime defaults in `src/runtime.c`.
 
@@ -224,6 +225,18 @@ Installed commands:
 Use one head per installation/cluster. The console can follow a head started
 from the terminal; the state-directory lock prevents a second head from resetting
 its sessions. Reconnect reuses verified unit files and compatible measurements.
+
+Stop the head before saving settings. An invalid field is rejected without
+changing the configuration. Leave **blocks on this Mac** empty only when you
+want automatic placement; an API start that omits `head_blocks` keeps the saved
+placement. Use the manager's `--configure-model` for model paths with spaces:
+it verifies the file and creates a suitable local link without copying it.
+
+The chat context selector includes **4K (4096 tokens)**, the Vulkan installer's
+initial setting. It shows the saved setting for the next start; applying a new
+size restarts a console-controlled head. It cannot change a terminal-controlled
+head while that head is running. Larger contexts need additional memory; the
+menu does not certify that every listed size fits your GPU.
 
 ## Install with a coding agent
 
