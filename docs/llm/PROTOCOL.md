@@ -32,7 +32,10 @@ print pairing secrets or expose local services to the Internet.
   are independent and share the head's receiving capacity.
 - Session/source/interface/step/layer/width checks and duplicate bitmaps.
 - FP16 wire values, equal local-input rounding, frozen accumulation policy.
-- Complete required sums, finite deadlines, no UDP layer retransmission today.
+- Complete required sums and finite deadlines. The UDP plane has no fragment
+  retransmission; ordinary generation retries one incomplete expert call with
+  a new step (500 ms first deadline, 1 s retry), then fails if still incomplete.
+  Do not confuse that with the synthetic demo or a reliable transport.
 - TCP unit transfer into temporary files, exact byte count and SHA-256 before
   publication; compatible calibration and unit caches reused at reconnect.
 
@@ -59,3 +62,7 @@ Compare complete generation with unchanged model, context, placement, output and
 accepted-token count. Report syscall/packet component gains separately. Update
 both the human protocol guide and this brief if a wire field or lifecycle changes;
 document compatibility rather than letting old nodes misinterpret a new frame.
+
+Do not label `request_gaps` as packet loss without checking the step sequence.
+A self-test-to-generation transition deliberately skips IDs; correlate deltas
+within a phase with head missing replies/retries and invalid/duplicate counters.

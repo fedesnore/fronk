@@ -247,6 +247,139 @@ Stay close, because two things remain yours:
 
 SSH is only for setup. The cluster uses Fronk's own connections while it runs.
 
+## Automate the documented commands over SSH
+
+The optional [`setup-cluster.sh`](../tools/install/setup-cluster.sh) wrapper runs
+the manager commands below from the head. It is part of this source checkout;
+the previously published v0.3.0 manager does not contain the wrapper. Download
+`fronk-manager.sh` and `SHA256SUMS` from the same release as described in
+[the setup brief](llm/SETUP.md#1-get-the-files). Keep the checkout containing the
+wrapper, `tools/install/ssh-prerequisites.sh` and `tools/api-check.py` together.
+The wrapper requires the **portable release manager**, not the source entry point
+`tools/install/fronk-install.sh`: that entry point needs its complete source tree
+and cannot be copied to a node on its own.
+
+The wrapper and manager fixes described here are source changes pending release.
+Running the published v0.3.0 manager still installs the v0.3.0 console, even when
+the orchestration script comes from a newer checkout. Record the release/checksum
+and checkout revision separately; do not claim that a wrapper upgrades that payload.
+
+First enable SSH on the nodes, verify their host keys by connecting yourself,
+and configure a key/agent or an authenticated SSH master connection. For each
+node, this command must work without a password prompt:
+
+```sh
+ssh -T -o BatchMode=yes USER@HOST 'uname -sm; hostname'
+```
+
+If you created a setup key with a non-default name, select it in an SSH config
+used by **both** `ssh` and `scp`. For example, save this as `fronk-ssh.conf` and
+pass `--ssh-config "$PWD/fronk-ssh.conf"` to every wrapper invocation:
+
+```text
+Host worker-mac
+    HostName mac.local
+    User alice
+    IdentityFile ~/.ssh/fronk_setup
+    IdentitiesOnly yes
+```
+
+Check it first with `ssh -F fronk-ssh.conf -T -o BatchMode=yes worker-mac
+'uname -sm; hostname'`. Use `worker-mac` in `nodes.txt`. Do not put passwords in
+the config or disable host-key checking. Reuse existing working authentication
+instead of creating another key unnecessarily.
+
+Set up compiler/Python prerequisites, routable cluster addresses and macOS
+Local Network permission first. SSH reachability alone does not test Fronk's
+UDP replies. The wrapper does not configure networks, install OS packages,
+accept host keys or delete previous installations. A Mac node needs its user
+logged in; a Linux node needs a working systemd user service. The manual
+`--no-service` alternative is not used by this wrapper. Before installing anything,
+the wrapper checks every node's non-interactive Python/compiler PATH, Python
+version, user service session and existing service owner. It also checks head
+console/API port conflicts before demo/model/run. Fix the named prerequisite and
+repeat the same command; a separate prefix does not avoid a service/port conflict.
+
+Create `nodes.txt` on the head with one row per node. Use SSH host aliases or
+`USER@HOST`, and absolute installation paths without spaces:
+
+```text
+# Fronk name    SSH destination    Installation prefix on that node
+node-1         alice@mac.local    /Users/alice/fronk
+node-2         bob@linux.local    /home/bob/fronk
+```
+
+Names and SSH destinations must be distinct. Do not list two addresses of the
+same computer as separate nodes. Reuse an existing managed node prefix: a
+second prefix does not create a second independent service for that user.
+The wrapper copies the verified manager to `~/fronk-manager.sh` on each node.
+Do not run it with shell tracing (`bash -x`); keep pairing codes out of logs.
+
+From the source checkout on the **head**, install/calibrate head and nodes:
+
+```sh
+bash tools/install/setup-cluster.sh \
+  --manager /path/to/fronk-manager.sh --checksums /path/to/SHA256SUMS \
+  --head-prefix "$HOME/fronk" --nodes nodes.txt --through install
+```
+
+The wrapper passes `--demo-later` to the head manager. In a manager newer than v0.3.0,
+this pauses after pairing even if an earlier demo already passed; it does not
+jump into model verification. The older v0.3.0 manager can still continue to
+its model step when resuming with a saved successful demo. Resume later stages
+with the same prefix instead of reinstalling a prepared cluster.
+
+Allow any macOS permission prompts on the machines themselves. Then verify
+all nodes and run the weight-free demo:
+
+```sh
+bash tools/install/setup-cluster.sh \
+  --manager /path/to/fronk-manager.sh --checksums /path/to/SHA256SUMS \
+  --head-prefix "$HOME/fronk" --nodes nodes.txt --resume --through demo
+```
+
+When the demo fits all 20 units and you have the exact local model, finish:
+
+```sh
+bash tools/install/setup-cluster.sh \
+  --manager /path/to/fronk-manager.sh --checksums /path/to/SHA256SUMS \
+  --head-prefix "$HOME/fronk" --nodes nodes.txt --resume \
+  --model "/Volumes/My SSD/Qwen3.8-Flash-Next-Q4.gguf"
+```
+
+Use `--ssh-config FILE` on every invocation if you need a dedicated OpenSSH
+configuration. `--through model` stops after model verification. `--resume`
+skips installation; it still verifies the current roster/demo and model before
+starting. If a node installation failed, rerun without `--resume`; completed
+manager work is reusable. For a fully prepared network, a single invocation
+without `--resume` or `--through` performs all stages.
+
+The final stage starts the documented head `--run` command in a separate
+session, waits up to 30 minutes for the generation report, and runs the public
+API check (JSON, SSE with usage, malformed request). `nohup` alone retains a
+controlling terminal when invoked from Terminal, so it is insufficient to
+select the manager's automatic console path. The wrapper uses Python's
+`start_new_session=True`, available on macOS and Linux, for that launch.
+
+Success leaves the head console at `http://127.0.0.1:7730` and the installed
+node services running independently of SSH. Open the console's chat link and
+check an actual answer. Log: `HEAD_PREFIX/state/setup-head.log`. A timeout or
+failure leaves services and logs available for diagnosis; it does not declare
+success, remove data or bypass a failed check. If console/API ports are already
+occupied, use the running instance or stop it before repeating setup.
+
+To stop a ready head, use **Quit the head** in its console (**Stop head** is
+available during startup). To restart it, use **Start** in
+that console or run `HEAD_PREFIX/bin/fronk-manager --run` in Terminal. On a
+node, use `NODE_PREFIX/bin/fronk-manager --stop`, `--run`, or `--status`.
+Node services start in their user's session; this is not a guarantee of startup
+before user login after reboot. See the
+[recorded installation audit](evidence/documented-install-20261106.md) for the
+tested machines, differences from the published guide, and exact commands.
+The [installer/console follow-up](evidence/install-console-fixes-20261106.md)
+lists the subsequent fixes, affected files, regression checks and the limits of
+the live update versus a new release qualification.
+
 ## Advanced: the complete procedure with commands
 
 This is the whole setup with commands that ask nothing, for people who manage their own
@@ -262,7 +395,7 @@ scp fronk-manager.sh HOST:
 
 # On the head, for each node: install it and pass the pairing code through the pipe
 ~/fronk/bin/fronk-manager --pairing-code |
-  ssh HOST 'bash fronk-manager.sh --yes --role node --name node-1 --secret-stdin'
+  ssh -T HOST 'bash fronk-manager.sh --yes --role node --name node-1 --secret-stdin'
 
 # On the head: verify all the nodes and run the synthetic demo
 ~/fronk/bin/fronk-manager --join-nodes --yes --nodes 'node-1 node-2'
@@ -273,9 +406,18 @@ scp fronk-manager.sh HOST:
 # On the head: start. In a terminal, this shows the plan and asks you to proceed
 ~/fronk/bin/fronk-manager --run
 
-# On the head: check the API from another terminal
+# On each node: check its installed service (or use ssh -T HOST with this command)
+~/fronk/bin/fronk-manager --status
+
+# On the head: wait for the generation report, then check the API from another terminal
 python3 ~/fronk/src/tools/api-check.py
 ```
+
+With an older downloaded manager, use this checkout's `tools/api-check.py` for
+Vulkan: it sends both the native `think: false` and llama.cpp's
+`chat_template_kwargs.enable_thinking: false`. The v0.3.0 check only sends the
+former; the short response budget can then be spent on reasoning without a
+visible answer. An HTTP 200 alone does not pass the check.
 
 Without SSH, run the node step on each node and enter the code at its private prompt:
 `bash fronk-manager.sh --terminal --role node --name node-1`. A Mac node runs as a
@@ -305,6 +447,15 @@ bash fronk-manager.sh --role head           # begin the new cluster on its head
 
 For a custom prefix, pass the same `--prefix` on maintenance commands. Do not
 remove the directory manually if it contains a model or other user files.
+
+There is one managed node service per user (`ai.fronk.node` on macOS,
+`fronk-node.service` on Linux). Inspect its owner before changing prefixes.
+Stop/uninstall the old owned service through its manager before installing at
+a new prefix; otherwise the service ownership check can reject the install.
+Never remove a different prefix's service to work around that check. Disk
+cleanup is a separate maintenance action: inventory old directories and model
+files first, preserve needed verified units, then remove only confirmed obsolete
+managed state. Do not fabricate hash stamps or delete the original GGUF.
 
 ## If a step fails
 

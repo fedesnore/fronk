@@ -15,7 +15,10 @@ For a new physical cluster, start with [NETWORK.md](NETWORK.md) in this director
 Determine which computer you are on, its intended role, installation prefix,
 release version and current manager step. Inspect saved configuration/status
 without printing `cluster.secret`. Identify any running head/node and existing
-weights. Preserve the functioning instance; use a separate prefix for tests.
+weights. Preserve the functioning instance. A separate head prefix isolates
+state, but ports can still conflict. Node services have one fixed name per user;
+an isolated node prefix cannot own an already-owned service. Reuse its managed
+prefix or explicitly migrate the stopped service with authorization.
 Only claim access to machines you can actually inspect.
 
 Begin with the role, OS, current step and error if there is one. Gather other
@@ -87,7 +90,7 @@ scp fronk-manager.sh HOST:
 
 # Each node, from the head. The code goes through the pipe: never print or store it.
 ~/fronk/bin/fronk-manager --pairing-code |
-  ssh HOST 'bash fronk-manager.sh --yes --role node --name NAME --secret-stdin'
+  ssh -T HOST 'bash fronk-manager.sh --yes --role node --name NAME --secret-stdin'
 
 # Head: verify all nodes and run the synthetic demo. Read its report and show it.
 ~/fronk/bin/fronk-manager --join-nodes --yes --nodes 'NAME1 NAME2'
@@ -95,13 +98,43 @@ scp fronk-manager.sh HOST:
 # Head: verify the exact weights. Use --download only if the person chose to.
 ~/fronk/bin/fronk-manager --configure-model --yes --model /path/to/Qwen3.8-Flash-Next-Q4.gguf
 
-# Head: start in the background; the console proceeds when all 20 units fit.
-nohup ~/fronk/bin/fronk-manager --run > ~/fronk/state/agent-head.log 2>&1 &
+# Head: detach from the controlling terminal so --run selects the console.
+python3 - <<'PY'
+from pathlib import Path
+import subprocess
+p = Path.home() / 'fronk'
+with (p / 'state/agent-head.log').open('ab') as log:
+    subprocess.Popen([str(p / 'bin/fronk-manager'), '--run'],
+                     stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                     start_new_session=True)
+PY
 
 # Head: when the model answers, run the numerical and API checks.
 curl -s http://127.0.0.1:7710/v1/models
 python3 ~/fronk/src/tools/api-check.py
 ```
+
+For the same sequence over existing non-interactive SSH, use
+[`setup-cluster.sh`](../../tools/install/setup-cluster.sh) as described in
+[the guide](../INSTALL.md#automate-the-documented-commands-over-ssh). It keeps the
+pairing code in a pipe, forces SSH without a PTY, uses native services and waits
+for generation/API checks. Network settings, OS prerequisites/permissions and
+authorized cleanup remain separate. Keep the wrapper, `ssh-prerequisites.sh` and
+`tools/api-check.py` together. Use the portable downloaded manager as `--manager`;
+the source shell entry point cannot be copied alone. Preflight checks every
+node's SSH PATH, Python >= 3.9, service login and service owner before installing
+the head. Node names are limited to 63 characters; prefixes must be dedicated
+absolute paths without spaces or dot components. The wrapper is new source, not part of the
+already-published v0.3.0 asset. Record both the manager checksum and checkout
+revision. Its API check comes from this checkout, not the installed release.
+The newer wrapper does not replace the console inside an older release payload.
+It requests `--demo-later` during head installation. Managers newer than v0.3.0 honor
+this pause even with a saved passing demo; v0.3.0 may continue into model setup
+in that case. Do not mistake source fixes for behavior of the old release asset.
+Record source-only fixes separately from a downloaded-manager qualification.
+For a named SSH key, use a host alias with IdentityFile/IdentitiesOnly in a config
+passed through `--ssh-config` on every invocation, including resume; test with
+`ssh -F FILE -T -o BatchMode=yes HOST 'uname -sm; hostname'` first.
 
 - Installing and calibrating can take many minutes. If your tool limits command time,
   run the step in the background and read its log. Rerunning a step keeps finished work.
@@ -125,7 +158,8 @@ Use manager upgrade/uninstall actions. Stop the owned head before changing its
 installation; honor its lock. Explain keep-state versus `--purge`: purging removes
 managed state/pairing and requires re-pairing, while model files are preserved.
 Do not remove another installation's service or an arbitrary user folder. Test
-fresh reinstall in an isolated prefix before proposing changes to working state.
+fresh reinstall with an unowned service/user or an explicitly authorized migration;
+changing only the node prefix does not isolate its service.
 
 Finish with what is running on which computer, verified model identity, chosen
 paths/placement, commands to reopen chat or resume setup, tests and remaining

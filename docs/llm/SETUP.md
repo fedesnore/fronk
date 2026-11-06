@@ -73,15 +73,27 @@ computers already share, before anything else.
 
 **Then connect, with the password typed in their terminal, never to you:**
 
-1. Create a key just for this setup, if there is none:
+1. Reuse working key/agent authentication or an authorized SSH master connection.
+   Create a key just for this setup only if there is none:
    `ssh-keygen -t ed25519 -N '' -f ~/.ssh/fronk_setup`. Say what it is and that they can
    remove it at the end.
-2. Give them one command per node to run in their own terminal on the head:
+2. If a new setup key was needed, give them one command per node to run in their own terminal on the head:
    `ssh-copy-id -i ~/.ssh/fronk_setup.pub USER@HOST`. Tell them it may ask to accept the
    computer, then for that computer's password, and that nothing appears while they type.
    You never see the password, and you never ask for it in this conversation.
-3. Check each one: `ssh -i ~/.ssh/fronk_setup -o BatchMode=yes -o IdentitiesOnly=yes USER@HOST 'uname -sm; hostname'`.
-   Use this key for every command below. Compare what you read with what they told you.
+3. Check each one using the chosen working access: `ssh -T -o BatchMode=yes USER@HOST 'uname -sm; hostname'`.
+   For the new setup key, add `-i ~/.ssh/fronk_setup -o IdentitiesOnly=yes`.
+   Keep the same key/agent or SSH configuration for every command below. Do not
+   require copying a new key when the existing connection already works.
+   Compare what you read with what they told you.
+
+For repeated commands, put a named setup key in an SSH config with `Host`,
+`HostName`, `User`, `IdentityFile ~/.ssh/fronk_setup` and `IdentitiesOnly yes`.
+Use that host alias and `-F FILE` consistently for both SSH and SCP, and pass
+`--ssh-config FILE` to the wrapper below. Merely creating a non-default key name
+does not make SSH choose it automatically. If `ssh-copy-id` is unavailable on
+the head, use the platform's documented authorized-key setup; do not silently
+fall back to storing a password in a script.
 
 If SSH reports `Host key verification failed`, do not turn the check off or delete the old
 key yourself. The computer is new to this one, or it changed: ask them to confirm it is theirs,
@@ -112,6 +124,18 @@ words: whether the model fits, and the estimated speed. Stop and ask before down
 
 On each Mac node, ask them to log in there and accept **Local Network** when asked. You
 cannot accept it over SSH.
+
+The optional source-checkout `tools/install/setup-cluster.sh` automates these same
+manager commands once SSH and the network work. Follow
+[its guide](../INSTALL.md#automate-the-documented-commands-over-ssh): use
+`--through install`, then `--resume --through demo`, and finally `--resume --model
+PATH`. Do not imply that the published v0.3.0 asset already includes this new
+wrapper. It does not perform OS/network setup or cleanup. Node service ownership
+is per user, not per prefix; inspect an existing installation before replacing it.
+Keep its `ssh-prerequisites.sh` and `tools/api-check.py` helpers with it. The
+preflight checks all node service sessions and prerequisites before installation;
+failure names the computer to fix. The published manager payload still determines
+which console is installed: a newer wrapper does not install unreleased fixes.
 
 ## 6. Finish
 

@@ -169,6 +169,8 @@ guide_nodes() {
 head_setup() {
     while :; do
         guide_nodes
+        # A saved demo result must not override an explicit pause after pairing.
+        (( !demo_later )) || return 0
         if ! demo_done; then
             # An explicit local GGUF can be verified offline. Downloads are
             # always gated, including non-interactive and resumed installs.

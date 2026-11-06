@@ -44,4 +44,12 @@ ask() {
     esac
 }
 [[ $(choose_roster '') == 'desk spare' && $(choose_node_name '') == desk ]]
+# Resuming with a successful old demo must still honor an explicit pause. In
+# particular, the install-only SSH stage must not jump into model verification.
+guide_nodes() { :; }
+demo_done() { return 0; }
+ask() { die 'unexpected model question after --demo-later'; }
+configure_model() { die 'unexpected model verification after --demo-later'; }
+demo_later=1
+head_setup
 echo '[ok] installer choices: assigned names, counts, existing roster, custom names, compatible backends and unattended defaults'

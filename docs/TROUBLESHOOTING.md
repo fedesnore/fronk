@@ -86,6 +86,21 @@ useful than a large archive.
 
 ## Common cases
 
+**SSH works, but the installer cannot start a Mac node.** Remote Login does not
+create the graphical user session required by a LaunchAgent. Log in on that Mac
+as the same user, then repeat the installer command. The manager checks this
+before building. For the SSH wrapper, Python 3.9+, `cc` and `make` must also be
+available in a non-interactive SSH session, which may have a different PATH.
+
+**A long extraction finishes, then SELFTEST gets no reply.** Keep the verified
+units. Inspect the named node's `node.log`, local-network permission and selected
+path. A successful initial multicast probe does not prove that membership stayed
+usable during extraction. At the failed-cycle prompt choose **Modified** (`m`)
+to repeat CONNECTION and select working paths; do not request fresh calibration
+or erase slices. Fronk may select unicast. Require SELFTEST, generation and a
+chat after an idle interval before declaring recovery. This is a documented
+recovery for the observed multicast issue, not a confirmed IGMP fix.
+
 **Pairing succeeds but generation loses a Mac.** Authentication uses TCP;
 expert replies use UDP. Inspect the node's reply error, route and local-network
 permission. A process started through SSH may have a different permission

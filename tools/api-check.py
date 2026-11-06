@@ -30,7 +30,7 @@ def main():
         with request("/models") as response:
             model = json.load(response)["data"][0]["id"]
         result["model"] = model
-        body = {"model": model, "think": False, "temperature": 0,
+        body = {"model": model, "think": False, "chat_template_kwargs": {"enable_thinking": False}, "temperature": 0,
                 "max_tokens": 64, "messages": [{"role": "user", "content": "Reply with one short sentence explaining what a network is."}]}
         with request("/chat/completions", body) as response:
             completed = json.load(response)

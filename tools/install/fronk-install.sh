@@ -302,7 +302,8 @@ if [[ $role == node ]]; then
     valid_name "$name" || die "invalid node name"
     if ((!no_service)); then
         [[ ! -f $service_file ]] || service_owned || die "another prefix owns the node service; use --no-service or manage that installation first"
-        if [[ $OS == Linux ]]; then systemctl --user show-environment >/dev/null || die "a systemd user session is required; use --no-service to run manually"; fi
+        if [[ $OS == Linux ]]; then systemctl --user show-environment >/dev/null || die "a systemd user session is required; use --no-service to run manually"
+        else launchctl print "gui/$(id -u)" >/dev/null 2>&1 || die "log in graphically as this user on the Mac before installing its LaunchAgent, then rerun this command"; fi
     fi
 elif [[ -n $node_burst || -n $name || $secret_stdin == 1 || $no_service == 1 ]]; then die "--burst, --name, --no-service and --secret-stdin apply to nodes"; fi
 if [[ -d $HOME/fronk-cluster/source && $role == node ]]; then
