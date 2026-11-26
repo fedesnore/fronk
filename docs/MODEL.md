@@ -35,6 +35,30 @@ Weights remain under the upstream
 separately from Fronk's MIT code license. Fronk release archives contain no model
 weights. Model authors/converters are credited in the upstream model card.
 
+## The 3-bit weights for the llama.cpp head
+
+A head installed with `--engine gsq` uses a different conversion of the same
+model, ISTA-DASLab's GSQ-RCO in its IQ3_XXS variant. [GSQ.md](GSQ.md) explains
+why it needs another engine and how to build it. The head accepts exactly these
+files, two shards kept in one folder:
+
+| Field | Shard 1 (loaded) | Shard 2 (n-gram table, read from SSD) |
+|---|---|---|
+| File | `Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf` | `Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00002-of-00002.gguf` |
+| Exact bytes | `47039860096` (47.04 GB) | `28800138432` (28.80 GB) |
+| SHA-256 | `219ea929900dfa9ef091f3aa473fdba6874b65fcb36526d7d851ac9e95856d15` | `316b46f3a2dbd68c900f43136ab9449f9dcc3725dfd8c794847c204bc161e113` |
+
+Both come from `ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF` on Hugging Face,
+[revision `ed59f92`](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF/tree/ed59f92082b1e93c0e96d60a8b11aab089b52f09/IQ3_XXS),
+under the license stated in that repository. A GSQ unit is about 2.185 GB, and
+the 20 units total 43.70 GB. `tools/install/model-gsq.conf` is the installer
+identity for these files.
+
+MTP drafting needs one more file, `mtp-Qwen3.8-Flash-Next.gguf`, in the folder
+above the shards. `tools/gsq-mtp-build.py` builds it from the MTP layer of the Q4
+file in the table at the top of this page and the embeddings of shard 1, without
+requantizing anything. Without it the engine drafts from n-grams only.
+
 ## Local files and external drives
 
 Select the exact file or its containing folder in the manager. It checks the

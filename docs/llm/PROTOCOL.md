@@ -33,9 +33,15 @@ print pairing secrets or expose local services to the Internet.
 - Session/source/interface/step/layer/width checks and duplicate bitmaps.
 - FP16 wire values, equal local-input rounding, frozen accumulation policy.
 - Complete required sums and finite deadlines. The UDP plane has no fragment
-  retransmission; ordinary generation retries one incomplete expert call with
-  a new step (500 ms first deadline, 1 s retry), then fails if still incomplete.
-  Do not confuse that with the synthetic demo or a reliable transport.
+  retransmission; ordinary generation asks an incomplete expert call again,
+  alone, with a new step each time (500 ms first deadline, then 1, 2, 4, 8 and
+  15 s), then fails if still incomplete. A silent expert cache is not a failure:
+  its experts return to the slice nodes. Do not confuse that with the synthetic
+  demo or a reliable transport.
+- GSQ sessions (llama.cpp head, [GSQ.md](../GSQ.md)): calls of up to 32 tokens,
+  two in flight; optional type 5 requests carrying Q8_K activations, used only
+  after every node answers `q8k-v1`. Replies stay FP16. Check which session
+  kind is running before comparing sizes or timings.
 - TCP unit transfer into temporary files, exact byte count and SHA-256 before
   publication; compatible calibration and unit caches reused at reconnect.
 

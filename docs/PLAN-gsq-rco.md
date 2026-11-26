@@ -2,7 +2,12 @@
 
 Goal: run Qwen3.8-Flash-Next with ISTA-DASLab's GSQ-RCO weights (near the BF16
 model's quality at about a seventh of its size) on the Fronk cluster with the M1 Pro
-as head, so the M4 Pro stays free. Nothing here has run yet.
+as head, so the M4 Pro stays free.
+
+These are the working notes of the port, kept as they were written: the plan
+first, then what was measured along the way. Some names in them (`gsq-node`,
+`gsq-broker`, `gsq-test.sh`) belong to early prototypes that are not in this
+tree. [GSQ.md](GSQ.md) describes what was built.
 
 ## Weights
 

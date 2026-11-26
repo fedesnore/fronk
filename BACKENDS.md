@@ -13,6 +13,12 @@ dense GPU engine is a separate component.
 | `metal` | Apple Silicon GPUs |
 | `metal-ssd` | Measured RAM + SSD expert placement using Metal |
 | `ref`, `ref-q8` | Portable scalar implementations for reference and validation |
+| `gsq` | x86 (AVX2, FMA, F16C, BMI2) and ARM (NEON) CPUs, for GSQ units only |
+
+A backend computes one unit format. All the others read native units, cut from
+the Q4 file. `gsq` reads the units of the 3-bit file that the llama.cpp head
+uses, and a node offers it only when the head announces that format. It is the
+only backend for those units so far; [GSQ.md](docs/GSQ.md) describes them.
 
 You can add a backend for your hardware starting from
 [user-template.c](backends/user-template.c). It gives you a complete scalar
