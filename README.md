@@ -52,7 +52,8 @@ engine of 0.3.0 cannot read that file's formats and llama.cpp can, so this path
 uses llama.cpp for the head's dense part, with one patch that sends the routed
 experts to the cluster. Nodes get a matching CPU backend. A machine that is fast
 but short of memory can also serve as a cache of the experts in use, beside the
-nodes that hold slices.
+nodes that hold slices. On my five computers this path wrote short replies at a
+median of 25.8 tokens per second ([how it was measured](docs/GSQ.md#measured-speed)).
 
 It is built from a checkout on an Apple Silicon head; the downloads below are
 still 0.3.0. Read [why and how](docs/GSQ.md) and
