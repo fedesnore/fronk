@@ -1,7 +1,7 @@
 # One native build and a separate sanitizer build, using only the system C tools.
 # Keep make compatible with macOS GNU make 3.81.
 
-VERSION := 0.3.0
+VERSION := 0.7.0
 SYSTEM := $(shell uname -s)
 ARCH := $(shell uname -m)
 ifeq ($(SYSTEM),Darwin)

@@ -57,7 +57,7 @@ median of 25.8 tokens per second ([how it was measured](docs/GSQ.md#measured-spe
 
 It is built from a checkout on an Apple Silicon head; the downloads below are
 still 0.3.0. Read [why and how](docs/GSQ.md) and
-[what changed in 0.4.0](docs/releases/0.4.0.md).
+[what changed in 0.7.0](docs/releases/0.7.0.md).
 
 ## Will it work on your machines?
 

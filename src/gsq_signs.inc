@@ -1,3 +1,5 @@
+/* The sign table of ggml's IQ2/IQ3 kernels (keven_signs_q2xs in ggml-common.h),
+ * as bytes. MIT, Copyright (c) 2023-2026 The ggml authors: third_party/ggml/LICENSE. */
 static const int8_t keven_signs_q2xs[1024] = {
      1,  1,  1,  1,  1,  1,  1,  1, -1,  1,  1,  1,  1,  1,  1, -1,  1, -1,  1,  1,  1,  1,  1, -1, -1, -1,  1,  1,  1,  1,  1,  1,
      1,  1, -1,  1,  1,  1,  1, -1, -1,  1, -1,  1,  1,  1,  1,  1,  1, -1, -1,  1,  1,  1,  1,  1, -1, -1, -1,  1,  1,  1,  1, -1,

@@ -57,7 +57,8 @@ identity for these files.
 MTP drafting needs one more file, `mtp-Qwen3.8-Flash-Next.gguf`, in the folder
 above the shards. `tools/gsq-mtp-build.py` builds it from the MTP layer of the Q4
 file in the table at the top of this page and the embeddings of shard 1, without
-requantizing anything. Without it the engine drafts from n-grams only.
+requantizing anything. Without it the engine drafts from n-grams only. The
+result holds weights from both files, so both licenses apply to it.
 
 ## Local files and external drives
 

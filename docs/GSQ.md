@@ -8,7 +8,7 @@ of the work, the two kinds of node, and how to build and start it.
 
 It is a development path. You build it from a checkout, on an Apple Silicon head;
 the downloadable 0.3.0 managers do not contain it. The ds4 head and the Q4 file
-work as before. [What changed in 0.4.0](releases/0.4.0.md) lists everything that
+work as before. [What changed in 0.7.0](releases/0.7.0.md) lists everything that
 came with it.
 
 **On this page:**
@@ -168,7 +168,8 @@ CMake and network access for the first build. Nodes need what they needed before
 
 2. **Get the weights.** Put the two IQ3_XXS shards of the pinned revision in one
    folder; [MODEL.md](MODEL.md#the-3-bit-weights-for-the-llamacpp-head) gives
-   names, sizes and digests.
+   names, sizes and digests. Download them yourself: for this engine the
+   manager verifies local files and does not download.
 
 3. **Build the MTP file** next to that folder (optional, but without it the
    engine drafts from n-grams only, which is slower):
