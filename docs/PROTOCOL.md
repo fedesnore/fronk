@@ -92,6 +92,7 @@ fronk-cli -h NODE_IP --config NODE_CONFIG UNITS
 | `SESSION START id unit-mask burst deadline-us`, `SESSION STOP` | Start/stop a selected backend and its data-plane receiver |
 | `EXPERT-ORDER` | Advertise the current expert-order capability for compatible research paths |
 | `LAYOUT native\|gsq` | The unit format of this head's model. A head with the Q4 file sends nothing, so the default stays native |
+| `PACE` | In a session: a reply of several datagrams waits until the head asks for it, so nodes behind one head interface answer in turn |
 | `WIRE-Q8K` | Ask whether this node accepts Q8_K requests; it answers `q8k-v1` only with GSQ units loaded |
 | `SESSION CACHE id megabytes burst deadline-us`, `HOT layer expert`, `COLD layer expert` | Start an expert cache on a node without units, then copy one whole expert into it or release one (GSQ only) |
 

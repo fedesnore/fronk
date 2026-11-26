@@ -9,8 +9,8 @@ own notices. Source and installer distributions must carry these notices too.
 | ggml contributors / DeepSeek | Work credited by ds4 | Copyright notices retained in ds4's license/source |
 | Iris | ds4 image support | `ds4/third_party/iris/LICENSE` in the staged engine |
 | llama.cpp / ggml | Vulkan dense head and GPU probe | https://github.com/ggml-org/llama.cpp ; `LICENSE-llama.cpp` and `licenses/` in each bundled GPU runtime |
-| llama.cpp | Dense engine of the GSQ head, built from the pinned public commit plus `tools/engine/gsq/llama-fronk.patch` | https://github.com/ggml-org/llama.cpp ; MIT, the license stays in the prepared source tree |
-| ggml (part of llama.cpp) | Quantization kernels compiled into the `gsq` node backend | `third_party/ggml/`, with its MIT notice in `third_party/ggml/LICENSE`; `fronk_shim.c` in that folder is Fronk's |
+| llama.cpp | Dense engine of the GSQ head, built from the pinned public commit plus `tools/engine/gsq/llama-fronk.patch` | https://github.com/ggml-org/llama.cpp ; MIT notice in `tools/engine/gsq/LICENSE-llama.cpp`, also present in the prepared source tree. The engine binary built from it embeds llama.cpp's own bundled dependencies, whose notices are in that tree's `licenses/` |
+| ggml (part of llama.cpp) | Quantization kernels compiled into the `gsq` node backend | `third_party/ggml/`, with its MIT notice in `third_party/ggml/LICENSE`; `fronk_shim.c` in that folder is Fronk's. `src/gsq_multi.c` follows the shape of ggml's kernels and `src/gsq_signs.inc` is ggml's sign table, under the same notice |
 | MoltenVK | Vulkan on Intel macOS | https://github.com/KhronosGroup/MoltenVK ; `LICENSE-MoltenVK` beside the bundled library |
 | Deep Chat | Browser chat component | `tools/vendor/deep-chat-2.5.1/LICENSE` |
 | Qwen model and GGUF conversion | Separately downloaded weights | `docs/MODEL.md` and the pinned upstream model card/license |

@@ -6,3 +6,12 @@ configs/head.conf
 configs/node.conf
 port_sources/shuttle-avx2
 docs/media
+# Development tools of the GSQ path: timing workloads and a kernel check.
+tools/fronk_bench.py
+tools/quick.py
+tools/measure.py
+tools/measure-source.c
+tools/profile_run.py
+tools/chat_trace.py
+tools/dense_ceiling.py
+tools/gsq-multicheck.c
