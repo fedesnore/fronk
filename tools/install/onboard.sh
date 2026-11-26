@@ -186,7 +186,36 @@ head_setup() {
     done
 }
 
+# GSQ head: both shards in one folder (pinned names, sizes, SHA-256), and the MTP
+# head beside that folder. Local files only; the head builds its unit manifest.
+configure_model_gsq() {
+    step "Head · Model weights (GSQ-RCO IQ3_XXS)"
+    say "Supported files: $GSQ_MODEL_NAME and $GSQ_SHARD2_NAME from $GSQ_MODEL_URL"
+    local existing path dir
+    existing=$(awk '$1=="model" {print $2;exit}' "$CONF")
+    if [[ -z $model ]]; then
+        if [[ -n $existing && -f $existing ]]; then model=$existing
+        elif ((yes)); then say "Model setup pending. Resume with $PREFIX/bin/fronk-manager --configure-model --model FOLDER."; return
+        else model=$(ask "Full path of $GSQ_MODEL_NAME or the folder containing both shards" ""); fi
+    fi
+    [[ ! -d $model ]] || model=${model%/}/$GSQ_MODEL_NAME
+    [[ -f $model ]] || die "model file not found: $model"
+    path=$(cd "$(dirname "$model")" && pwd -P)/$(basename "$model"); dir=$(dirname "$path")
+    [[ $(basename "$path") == "$GSQ_MODEL_NAME" ]] || die "the GSQ head needs $GSQ_MODEL_NAME (shard 1)"
+    python3 "$HERE/verify-model.py" "$path" "$STATE" "$GSQ_MODEL_BYTES" "$GSQ_MODEL_SHA256" --cache gsq-shard1.verified --no-manifest ||
+        die "GSQ shard 1 verification failed"
+    [[ -f $dir/$GSQ_SHARD2_NAME ]] || die "shard 2 must be next to shard 1: $dir/$GSQ_SHARD2_NAME"
+    python3 "$HERE/verify-model.py" "$dir/$GSQ_SHARD2_NAME" "$STATE" "$GSQ_SHARD2_BYTES" "$GSQ_SHARD2_SHA256" --cache gsq-shard2.verified --no-manifest ||
+        die "GSQ shard 2 verification failed"
+    if [[ -f $dir/../$GSQ_MTP_NAME ]]; then say "MTP head found: $(cd "$dir/.." && pwd -P)/$GSQ_MTP_NAME"
+    else say "No MTP head at $dir/../$GSQ_MTP_NAME: the engine drafts with n-grams (slower). Build it with tools/gsq-mtp-build.py."; fi
+    [[ $path =~ ^/[A-Za-z0-9._/-]+$ && ${#path} -le 480 ]] || die "move the shards to a folder whose path has no spaces"
+    set_conf model "$path"
+    model_ready=1
+    say "Verified GSQ weights configured. Start the head with $PREFIX/bin/fronk-head or open $PREFIX/bin/fronk-console."
+}
 configure_model() {
+    if [[ $(awk '$1=="ds4" {print $2;exit}' "$CONF") == tools/engine/gsq/run.sh ]]; then configure_model_gsq; return; fi
     step "Head · Model weights"
     say "Supported file: $MODEL_NAME ($MODEL_BYTES bytes). Other GGUF variants are not compatible."
     say "Model license (separate from Fronk): $MODEL_LICENSE_URL"

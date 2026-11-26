@@ -1,0 +1,1039 @@
+diff --git a/common/common.h b/common/common.h
+index e970fb3..0d7e120 100644
+--- a/common/common.h
++++ b/common/common.h
+@@ -333,6 +333,7 @@ struct common_params_speculative_draft {
+ 
+     float p_split = 0.1f; // speculative decoding split probability
+     float p_min   = 0.0f; // minimum speculative decoding probability (greedy)
++    float p_chain = -1.0f; // fronk: a request's chain threshold (see common_speculative_draft_params::p_chain); < 0: the launch value
+ 
+     bool backend_sampling = true; // offload draft sampling to the backend (default: on)
+ 
+diff --git a/common/sampling.cpp b/common/sampling.cpp
+index 564fa9c..14c3a80 100644
+--- a/common/sampling.cpp
++++ b/common/sampling.cpp
+@@ -695,9 +695,34 @@ std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sample
+ 
+     const llama_vocab * vocab = llama_model_get_vocab(llama_get_model(ctx));
+ 
++    // fronk: lenient verification, FRONK_SPEC_LENIENCE=p (unset or 0: exact, as upstream).
++    // A drafted token that differs from the one the target would emit is kept when
++    // the target itself gives it probability >= p: the text may then differ from the
++    // exact decode, but only by tokens the full model rates as likely. Never while a
++    // grammar constrains the output (tool calls stay exact) and never for an
++    // end-of-generation token on either side. Each kept token saves a whole pass.
++    static const float lenience = [] {
++        const char * v = getenv("FRONK_SPEC_LENIENCE");
++        const float  x = v ? strtof(v, nullptr) : 0.0f;
++        return x > 0.0f && x < 1.0f ? x : 0.0f;
++    }();
++    const int n_vocab = llama_vocab_n_tokens(vocab);
++
+     size_t i = 0;
+     for (; i < draft.size(); i++) {
+-        const llama_token id = common_sampler_sample(gsmpl, ctx, idxs[i], grammar_first);
++        llama_token id = common_sampler_sample(gsmpl, ctx, idxs[i], grammar_first);
++
++        if (lenience > 0.0f && draft[i] != id && draft[i] >= 0 && draft[i] < n_vocab && !grammar_should_apply(gsmpl) &&
++            !llama_vocab_is_eog(vocab, id) && !llama_vocab_is_eog(vocab, draft[i])) {
++            const float * logits = llama_get_logits_ith(ctx, idxs[i]);
++            float top = logits[0];
++            for (int k = 1; k < n_vocab; ++k) top = std::max(top, logits[k]);
++            double sum = 0.0;
++            for (int k = 0; k < n_vocab; ++k) sum += std::exp((double) (logits[k] - top));
++            if (std::exp((double) (logits[draft[i]] - top)) / sum >= lenience) {
++                id = draft[i];
++            }
++        }
+ 
+         common_sampler_accept(gsmpl, id, true);
+ 
+diff --git a/common/speculative.cpp b/common/speculative.cpp
+index e6290ea..34ae9eb 100644
+--- a/common/speculative.cpp
++++ b/common/speculative.cpp
+@@ -1893,8 +1893,19 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+                 // add drafted token for each sequence
+                 const llama_token id = dparams.at(seq_id).result_q ? id_sampled : cur_p->data[0].id;
+ 
+-                // only collect very high-confidence draft tokens
+-                if (cur_p->data[0].p < params.p_min) {
++                // only collect very high-confidence draft tokens (the request may set its own threshold)
++                const float p_min = dparams.at(seq_id).p_min >= 0.0f ? dparams.at(seq_id).p_min : params.p_min;
++                // and only while the whole chain so far is likely enough to be kept
++                static const float env_chain = [] { const char * v = getenv("FRONK_DRAFT_P_CHAIN"); return v ? (float) atof(v) : 0.0f; }();
++                const float p_chain = dparams.at(seq_id).p_chain >= 0.0f ? dparams.at(seq_id).p_chain : env_chain;
++                auto & chain = dparams.at(seq_id).chain;
++                if (dparams.at(seq_id).result->empty()) {
++                    chain = 1.0f;
++                    dparams.at(seq_id).probs.clear();
++                }
++                dparams.at(seq_id).probs.push_back(cur_p->data[0].p); // also the one that ends the draft
++                chain *= cur_p->data[0].p;
++                if (cur_p->data[0].p < p_min || chain < p_chain) {
+                     drafting[seq_id] = false;
+                     n_drafting--;
+ 
+@@ -1912,7 +1923,8 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+                     dp.result_q->emplace_back(cur_p->data, cur_p->data + cur_p->size);
+                 }
+ 
+-                if (params.n_max <= (int) result.size()) {
++                // the request may ask for shorter drafts than the drafter was started with
++                if (params.n_max <= (int) result.size() || (dp.n_max > 0 && dp.n_max <= (int) result.size())) {
+                     drafting[seq_id] = false;
+                     n_drafting--;
+                     continue;
+diff --git a/common/speculative.h b/common/speculative.h
+index 4262327..b688bf9 100644
+--- a/common/speculative.h
++++ b/common/speculative.h
+@@ -79,6 +79,16 @@ struct common_speculative_draft_params {
+     // the target's temp and seed, read only when the drafter samples probabilistically
+     float    temp = 1.0f;
+     uint32_t seed = LLAMA_DEFAULT_SEED;
++
++    // this request's confidence threshold (fronk: speculative.p_min of the request); < 0: the drafter's own
++    float    p_min = -1.0f;
++
++    // fronk: drafts chosen by cost. A drafted token is kept by the target only if every token
++    // before it was: its chance is the product of the chain's probabilities. Drafting stops when
++    // that product falls below p_chain (0 = no such rule; < 0: FRONK_DRAFT_P_CHAIN, else 0).
++    float    p_chain = -1.0f;
++    float    chain   = 1.0f; // the drafter's running product for this draft
++    std::vector<float> probs; // the probability the drafter gave each drafted token (FRONK_DRAFT_LOG)
+ };
+ 
+ common_speculative_draft_params & common_speculative_get_draft_params(common_speculative * spec, llama_seq_id seq_id);
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 97250c2..f14e51e 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -18,6 +18,7 @@ set(LLAMA_CORE_SOURCES
+     llama-cparams.cpp
+     llama-grammar.cpp
+     llama-graph.cpp
++    llama-fronk.cpp
+     llama-hparams.cpp
+     llama-impl.cpp
+     llama-io.cpp
+diff --git a/src/fronk_client.h b/src/fronk_client.h
+new file mode 100644
+index 0000000..07bfce6
+--- /dev/null
++++ b/src/fronk_client.h
+@@ -0,0 +1,135 @@
++/* fronk_client.h - header-only client for the head's expert service (like
++ * hiredis, but one call). The engine passes the routed-expert inputs of one
++ * layer and receives the gated sum of routed + shared experts. It knows
++ * nothing about ds4. Enabled when FRONK_MOE_SOCKET names the head's socket.
++ * Wire format: see src/serve.h. Bursts above FRONK_BURST tokens are sent in chunks.
++ */
++#ifndef FRONK_CLIENT_H
++#define FRONK_CLIENT_H
++#include <errno.h>
++#include <math.h>
++#include <poll.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include <sys/socket.h>
++#include <sys/un.h>
++#define FRONK_HIDDEN 2560
++#define FRONK_ROUTED 10
++#define FRONK_BURST 32  /* = FR_MAX_BURST: two calls per layer for a 64-token prompt batch */
++static int fronk_fd=-1;
++static int fronk_enabled(void) { const char *p=getenv("FRONK_MOE_SOCKET"); return p && *p; }
++static int fronk_io(void *p,size_t n,int out) {
++    for (char *c=(char *)p;n;) { ssize_t k=out?send(fronk_fd,c,n,0):recv(fronk_fd,c,n,0); if (k<=0) return -1; c+=k; n-=(size_t)k; }
++    return 0;
++}
++static int fronk_connect(void) {
++    if (fronk_fd>=0) return 0;
++    struct sockaddr_un a; memset(&a,0,sizeof(a)); a.sun_family=AF_UNIX;
++    const char *path=getenv("FRONK_MOE_SOCKET"); if (!path || strlen(path)>=sizeof(a.sun_path)) return -1;
++    strcpy(a.sun_path,path);
++    if ((fronk_fd=socket(AF_UNIX,SOCK_STREAM,0))<0) return -1;
++    if (connect(fronk_fd,(struct sockaddr *)&a,sizeof(a))) { close(fronk_fd); fronk_fd=-1; return -1; }
++    return 0;
++}
++/* A split call owns the socket until collect. The request is kept here: an
++ * expert sum has no side effects, so when the head or a node stops answering the
++ * same call is sent again once the head is back. The engine pauses instead of
++ * dying, and the chat's context stays in memory. Only a head that cannot even be
++ * connected to for FRONK_GIVE_UP_S seconds (it was stopped) ends the wait. */
++#define FRONK_GIVE_UP_S 30
++/* The lifeboat. A file named like the socket plus ".lifeboat" asks the engine to end
++ * the pass in flight without the cluster. The engine's supervisor creates it when the
++ * chat must be saved and the cluster does not answer (a node or the head fell): the
++ * caller then computes the expert calls itself from the model file. That is slow and
++ * reads the SSD, so it is an emergency path, but it brings the engine between two
++ * passes, the only place where its context can be saved. */
++static int fronk_lifeboat(void) {
++    static char path[192];
++    if (!path[0]) {
++        const char *s=getenv("FRONK_MOE_SOCKET");
++        if (!s || strlen(s)+10>sizeof(path)) return 0;
++        snprintf(path,sizeof(path),"%s.lifeboat",s);
++    }
++    return access(path,F_OK)==0;
++}
++static struct {
++    uint32_t head[3]; uint16_t e[FRONK_BURST][FRONK_ROUTED]; float g[FRONK_BURST][FRONK_ROUTED+1];
++    float x[FRONK_BURST][FRONK_HIDDEN];
++} fronk_call;
++static unsigned fronk_pending_tokens=0,fronk_pending_layer=0;
++static void fronk_drop(void) { if (fronk_fd>=0) close(fronk_fd); fronk_fd=-1; }
++static int fronk_fail(void) { fronk_drop(); fronk_pending_tokens=0; return -1; }
++static int fronk_send_call(void) {
++    const unsigned b=fronk_call.head[2];
++    if (fronk_connect()) return -1;
++    if (fronk_io(fronk_call.head,sizeof(fronk_call.head),1) || fronk_io(fronk_call.e,b*sizeof(fronk_call.e[0]),1) ||
++        fronk_io(fronk_call.g,b*sizeof(fronk_call.g[0]),1) || fronk_io(fronk_call.x,(size_t)b*sizeof(fronk_call.x[0]),1)) {
++        fronk_drop(); return -1;
++    }
++    return 0;
++}
++static int fronk_submit(unsigned layer,unsigned b,const float *x,const int32_t *ids,
++                        const float *weights,const float *shared_logit) {
++    if (!b || b>FRONK_BURST || fronk_pending_tokens || !x || !ids || !weights) return fronk_fail();
++    fronk_call.head[0]=0x4b4e5246u; fronk_call.head[1]=layer; fronk_call.head[2]=b;
++    for (unsigned t=0;t<b;++t) {
++        for (unsigned j=0;j<FRONK_ROUTED;++j) {
++            if (ids[t*FRONK_ROUTED+j]<0 || ids[t*FRONK_ROUTED+j]>65535) return fronk_fail();
++            fronk_call.e[t][j]=(uint16_t)ids[t*FRONK_ROUTED+j]; fronk_call.g[t][j]=weights[t*FRONK_ROUTED+j];
++        }
++        fronk_call.g[t][FRONK_ROUTED]=shared_logit?1.0f/(1.0f+expf(-shared_logit[t])):0.0f;
++    }
++    memcpy(fronk_call.x,x,(size_t)b*sizeof(fronk_call.x[0]));
++    if (fronk_lifeboat()) fronk_drop();   /* collect hands the call back to the caller */
++    else (void)fronk_send_call();  /* a failed send is retried by collect */
++    fronk_pending_layer=layer; fronk_pending_tokens=b; return 0;
++}
++/* The head's answer has begun to arrive (0), or the lifeboat was asked for meanwhile (1).
++ * A head that waits for a silent node answers only after its own retries, half a minute. */
++static int fronk_answer_or_lifeboat(void) {
++    for (;;) {
++        struct pollfd p={fronk_fd,POLLIN,0};
++        int n=poll(&p,1,500);
++        if (n>0 || (n<0 && errno!=EINTR)) return 0;   /* recv reports an error */
++        if (fronk_lifeboat()) return 1;
++    }
++}
++/* 0: y holds the cluster's answer. 1: the lifeboat was asked for, the caller computes
++ * this call (kept in fronk_call) itself. -1: the head stayed unreachable. */
++static int fronk_collect(unsigned layer,unsigned b,float *y,uint32_t *missing) {
++    if (!b || b!=fronk_pending_tokens || layer!=fronk_pending_layer || !y || !missing) return fronk_fail();
++    unsigned waited=0,unreachable=0;
++    for (;;) {
++        int32_t status; uint32_t miss;
++        if (fronk_lifeboat() || (fronk_fd>=0 && fronk_answer_or_lifeboat())) {
++            fronk_drop(); fronk_pending_tokens=0; *missing=0; return 1;
++        }
++        if (fronk_fd>=0 && !fronk_io(&status,4,0) && !fronk_io(&miss,4,0) &&
++            !fronk_io(y,(size_t)b*FRONK_HIDDEN*sizeof(float),0) && !status && !miss) break;
++        fronk_drop();
++        if (!waited) fprintf(stderr,"llama-fronk: cluster paused at layer %u: waiting for the head and its nodes\n",layer);
++        sleep(1); ++waited;
++        if (fronk_send_call()) {
++            if (++unreachable>=FRONK_GIVE_UP_S) { fprintf(stderr,"llama-fronk: head unreachable for %u s\n",unreachable); return fronk_fail(); }
++        } else unreachable=0;
++    }
++    if (waited) fprintf(stderr,"llama-fronk: cluster resumed after %u s at layer %u\n",waited,layer);
++    fronk_pending_tokens=0; *missing=0; return 0;
++}
++static int fronk_moe(unsigned layer,unsigned T,const float *x,const int32_t *ids,const float *weights,
++                     const float *shared_logit,float *y,uint32_t *missing) {
++    *missing=0;
++    for (unsigned base=0;base<T;base+=FRONK_BURST) {
++        unsigned b=T-base<FRONK_BURST?T-base:FRONK_BURST;uint32_t miss;
++        if (fronk_submit(layer,b,x+(size_t)base*FRONK_HIDDEN,ids+base*FRONK_ROUTED,weights+base*FRONK_ROUTED,
++                         shared_logit?shared_logit+base:NULL)) return -1;
++        int rc=fronk_collect(layer,b,y+(size_t)base*FRONK_HIDDEN,&miss);
++        if (rc) return rc;   /* 1: the caller computes the whole call itself */
++        *missing|=miss;
++    }
++    return 0;
++}
++#endif
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 85c32c9..a379d42 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -242,6 +242,7 @@ llama_context::llama_context(
+     cparams.cb_eval_user_data = params.cb_eval_user_data;
+ 
+     cparams.ctx_other = nullptr;
++    cparams.ctx_tables = params.ctx_other;
+ 
+     // TODO: more generic
+     if (model.arch == LLM_ARCH_GEMMA4_ASSISTANT) {
+diff --git a/src/llama-cparams.h b/src/llama-cparams.h
+index 9141cba..0c72451 100644
+--- a/src/llama-cparams.h
++++ b/src/llama-cparams.h
+@@ -72,4 +72,5 @@ struct llama_cparams {
+     void * cb_eval_user_data;
+ 
+     llama_context * ctx_other;
++    llama_context * ctx_tables; // the context a draft was made for, whatever the architecture: its model may lend its token table and output head (qwen4exp MTP)
+ };
+diff --git a/src/llama-fronk.cpp b/src/llama-fronk.cpp
+new file mode 100644
+index 0000000..a8f3f0a
+--- /dev/null
++++ b/src/llama-fronk.cpp
+@@ -0,0 +1,380 @@
++// llama-fronk.cpp - see llama-fronk.h.
++#include "llama-fronk.h"
++
++#include "fronk_client.h"
++
++#include <atomic>
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <chrono>
++#include <mutex>
++#include <thread>
++#include <vector>
++
++#include <sys/mman.h>
++#include <unistd.h>
++
++namespace {
++
++enum class mode { off, socket, ref, zero, sleep };
++
++mode fronk_mode() {
++    static const mode m = [] {
++        const char * sock = getenv("FRONK_MOE_SOCKET");
++        const char * loop = getenv("FRONK_MOE_LOOPBACK");
++        if (loop && !strcmp(loop, "ref"))  return mode::ref;
++        if (loop && !strcmp(loop, "zero")) return mode::zero;
++        if (loop && !strncmp(loop, "sleep", 5)) return mode::sleep;  // zero output after a fixed wait (timing only)
++        if (sock && *sock)                 return mode::socket;
++        return mode::off;
++    }();
++    return m;
++}
++
++struct layer_ctx {
++    int il;
++    ggml_tensor * up;
++    ggml_tensor * gate;
++    ggml_tensor * down;
++};
++
++// FRONK_MOE_PROFILE=1: where the head's time goes between expert calls.
++// "layer" = from one call's return to the next call in the same pass (GPU work of
++// one layer plus the GPU<->CPU hand-offs), "pass" = from the last layer's return
++// to the next pass's first call (output, sampling, MTP drafts), "cluster" = the call.
++struct profile {
++    bool on = getenv("FRONK_MOE_PROFILE") != nullptr;
++    double last_exit = 0, layer = 0, pass = 0, cluster = 0;
++    long n_layer = 0, n_pass = 0, n_call = 0, tokens = 0;
++    int last_il = -1;
++    static double now() {
++        return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
++    }
++    void enter(int il, double t) {
++        if (last_exit > 0 && t - last_exit < 1.0) {
++            if (il == last_il + 1) { layer += t - last_exit; ++n_layer; }
++            else                    { pass  += t - last_exit; ++n_pass;  }
++        }
++    }
++    void exit(int il, double t0, double t, long ntok) {
++        cluster += t - t0; ++n_call; tokens += ntok; last_exit = t; last_il = il;
++        if (n_call % 4800 == 0 && n_layer && n_pass) {
++            fprintf(stderr, "llama-fronk: width %.2f; per layer %.3f ms head + %.3f ms cluster; per pass %.2f ms between passes\n",
++                    (double) tokens / n_call, layer * 1e3 / n_layer, cluster * 1e3 / n_call, pass * 1e3 / n_pass);
++        }
++    }
++} g_prof;
++
++// One slot per layer; the tensors belong to the model and outlive every graph.
++layer_ctx g_layers[256];
++
++float dot_row(const ggml_tensor * w, int64_t row, const float * x, std::vector<float> & tmp) {
++    const int64_t n = w->ne[0];
++    const auto * traits = ggml_get_type_traits(w->type);
++    tmp.resize(n);
++    const char * src = (const char *) w->data + row * w->nb[1];
++    if (w->type == GGML_TYPE_F32) {
++        memcpy(tmp.data(), src, n * sizeof(float));
++    } else {
++        traits->to_float(src, tmp.data(), n);
++    }
++    double s = 0;
++    for (int64_t i = 0; i < n; ++i) s += (double) tmp[i] * x[i];
++    return (float) s;
++}
++
++// Reference routed sum for token t: sum_j w_j * down_e(silu(gate_e x) * up_e x).
++void ref_token(const layer_ctx & L, const float * x, const int32_t * ids, const float * w,
++               int n_used, float * y) {
++    const int64_t n_embd = L.up->ne[0];
++    const int64_t n_ff   = L.up->ne[1];
++    std::vector<float> tmp, h(n_ff);
++    std::vector<double> acc(n_embd, 0.0);
++    for (int j = 0; j < n_used; ++j) {
++        const int64_t e = ids[j];
++        for (int64_t n = 0; n < n_ff; ++n) {
++            const float g = dot_row(L.gate, e * n_ff + n, x, tmp);
++            const float u = dot_row(L.up,   e * n_ff + n, x, tmp);
++            h[n] = g / (1.0f + expf(-g)) * u;
++        }
++        for (int64_t d = 0; d < n_embd; ++d) {
++            acc[d] += (double) w[j] * dot_row(L.down, e * n_embd + d, h.data(), tmp);
++        }
++    }
++    for (int64_t d = 0; d < n_embd; ++d) y[d] = (float) acc[d];
++}
++
++// ---- the lifeboat (fronk_client.h) ----------------------------------------------------
++// One call computed here from the expert weights in the model file, with the arithmetic
++// of the reference mode. It is slow and it reads the SSD: it only ends a pass that the
++// cluster cannot answer, so that the engine stands between two passes and its context
++// can be saved instead of being lost with a fallen node or a stopped head.
++struct boat_state { bool on = false; long calls = 0, tokens = 0; double seconds = 0; } g_boat;
++
++bool boat_ready(const layer_ctx & L) {
++    for (const ggml_tensor * w : { L.up, L.gate, L.down }) {
++        if (!w || !w->data) return false;
++        if (w->type != GGML_TYPE_F32 && !ggml_get_type_traits(w->type)->to_float) return false;
++    }
++    return L.up->ne[0] == FRONK_HIDDEN && L.gate->ne[0] == FRONK_HIDDEN && L.gate->ne[1] == L.up->ne[1] &&
++           L.down->ne[0] == L.up->ne[1];
++}
++
++// The pages of an expert leave the active set as soon as they were used: one pass can
++// touch gigabytes of experts, and the head has no memory to keep them.
++void boat_forget(const ggml_tensor * w, int64_t first_row, int64_t rows) {
++    static const uintptr_t page = (uintptr_t) sysconf(_SC_PAGESIZE);
++    uintptr_t a = (uintptr_t) w->data + (uintptr_t) first_row * w->nb[1];
++    uintptr_t b = a + (uintptr_t) rows * w->nb[1];
++    a = (a + page - 1) / page * page; b = b / page * page;
++    if (b > a) (void) madvise((void *) a, b - a, MADV_DONTNEED);
++}
++
++// y[t] = sum_j weight(t,j) * down_e(silu(gate_e x_t) * up_e x_t), e = expert(t,j): the
++// sum of ref_token, with one job per token and expert spread over the cores.
++template <typename X, typename E, typename W>
++void boat_call(const layer_ctx & L, unsigned n_tok, X x_of, E expert_of, W weight_of, float * y) {
++    const int64_t n_embd = L.up->ne[0], n_ff = L.up->ne[1];
++    const unsigned n_jobs = n_tok * FRONK_ROUTED;
++    std::vector<float> part((size_t) n_jobs * n_embd);
++    std::atomic<unsigned> next{0};
++    auto work = [&] {
++        std::vector<float> tmp, h(n_ff);
++        for (unsigned job; (job = next.fetch_add(1)) < n_jobs; ) {
++            const unsigned t = job / FRONK_ROUTED, j = job % FRONK_ROUTED;
++            const int64_t e = expert_of(t, j);
++            const float * x = x_of(t);
++            float * out = part.data() + (size_t) job * n_embd;
++            for (int64_t n = 0; n < n_ff; ++n) {
++                const float g = dot_row(L.gate, e * n_ff + n, x, tmp);
++                const float u = dot_row(L.up,   e * n_ff + n, x, tmp);
++                h[n] = g / (1.0f + expf(-g)) * u;
++            }
++            for (int64_t d = 0; d < n_embd; ++d) out[d] = dot_row(L.down, e * n_embd + d, h.data(), tmp);
++            boat_forget(L.gate, e * n_ff, n_ff); boat_forget(L.up, e * n_ff, n_ff); boat_forget(L.down, e * n_embd, n_embd);
++        }
++    };
++    unsigned n_thr = std::thread::hardware_concurrency();
++    n_thr = n_thr > 4 ? n_thr - 2 : 2;
++    if (n_thr > n_jobs) n_thr = n_jobs;
++    std::vector<std::thread> pool;
++    for (unsigned i = 1; i < n_thr; ++i) pool.emplace_back(work);
++    work();
++    for (auto & th : pool) th.join();
++    for (unsigned t = 0; t < n_tok; ++t) {
++        for (int64_t d = 0; d < n_embd; ++d) {
++            double s = 0;
++            for (unsigned j = 0; j < FRONK_ROUTED; ++j) s += (double) weight_of(t, j) * part[((size_t) t * FRONK_ROUTED + j) * n_embd + d];
++            y[(size_t) t * n_embd + d] = (float) s;
++        }
++    }
++}
++
++// The call the client kept (fronk_call): what the cluster was asked and did not answer.
++void boat_kept_call(const layer_ctx & L, unsigned n_tok, float * y) {
++    boat_call(L, n_tok,
++              [](unsigned t) { return (const float *) fronk_call.x[t]; },
++              [](unsigned t, unsigned j) { return (int64_t) fronk_call.e[t][j]; },
++              [](unsigned t, unsigned j) { return fronk_call.g[t][j]; }, y);
++}
++
++void boat_begin(const layer_ctx & L) {
++    if (!boat_ready(L)) {
++        fprintf(stderr, "llama-fronk: lifeboat asked at layer %d, but its expert weights cannot be read here\n", L.il);
++        abort();
++    }
++    if (!g_boat.on) {
++        g_boat = boat_state();
++        g_boat.on = true;
++        fprintf(stderr, "llama-fronk: lifeboat on at layer %d: the cluster does not answer, the expert calls of this pass are computed here from the model file\n", L.il);
++    }
++}
++
++void boat_end(double t0, unsigned n_tok) {
++    g_boat.seconds += profile::now() - t0; g_boat.tokens += n_tok;
++    if (++g_boat.calls % 16 == 0) fprintf(stderr, "llama-fronk: lifeboat: %ld calls, %ld tokens, %.1f s so far\n", g_boat.calls, g_boat.tokens, g_boat.seconds);
++}
++
++// The cluster answers again.
++void boat_off() {
++    if (!g_boat.on) return;
++    fprintf(stderr, "llama-fronk: lifeboat off after %ld calls, %ld tokens, %.1f s\n", g_boat.calls, g_boat.tokens, g_boat.seconds);
++    g_boat.on = false;
++}
++
++// FRONK_MOE_LIFEBOAT_CHECK=N (diagnostic, it reads the SSD): one call in N of every
++// layer (N=1: only the first) is also computed by the lifeboat, from the model file, and
++// compared with the cluster's answer, which sums the expert cache and the slices.
++// Checks spread over a generation also cover the experts the cache has replaced since.
++void boat_check(const layer_ctx & L, unsigned n_tok, const float * cluster) {
++    static const long every = [] { const char * v = getenv("FRONK_MOE_LIFEBOAT_CHECK"); if (!v) return 0L; const long n = atol(v); return n > 1 ? n : 1L; }();
++    static long seen[256];
++    if (!every) return;
++    const long n = seen[L.il]++;
++    if (every == 1 ? n != 0 : n % every != 0) return;
++    if (!boat_ready(L)) { fprintf(stderr, "llama-fronk: lifeboat check layer %d: expert weights cannot be read here\n", L.il); return; }
++    const double t0 = profile::now();
++    std::vector<float> mine((size_t) n_tok * FRONK_HIDDEN);
++    boat_kept_call(L, n_tok, mine.data());
++    double diff = 0, norm = 0;
++    for (size_t i = 0; i < mine.size(); ++i) { const double d = (double) mine[i] - cluster[i]; diff += d * d; norm += (double) mine[i] * mine[i]; }
++    fprintf(stderr, "llama-fronk: lifeboat check layer %d: relative_l2 %.4g against the cluster (%u tokens, types %s %s %s, %.2f s)\n",
++            L.il, norm > 0 ? sqrt(diff / norm) : -1.0, n_tok, ggml_type_name(L.gate->type), ggml_type_name(L.up->type),
++            ggml_type_name(L.down->type), profile::now() - t0);
++}
++
++std::mutex socket_mu;
++double overlap_start;
++
++void fronk_send_op(ggml_tensor * dst, int ith, int, void * userdata) {
++    if (ith != 0) return;
++    const layer_ctx & L = *(const layer_ctx *) userdata;
++    const ggml_tensor * x = dst->src[0], * ids = dst->src[1], * weights = dst->src[2];
++    GGML_ASSERT(x->type == GGML_TYPE_F32 && ids->type == GGML_TYPE_I32 && weights->type == GGML_TYPE_F32);
++    GGML_ASSERT(x->ne[0] == FRONK_HIDDEN && x->ne[1] > 0 && x->ne[1] <= FRONK_BURST);
++    GGML_ASSERT(ids->ne[0] == FRONK_ROUTED && ids->ne[1] == x->ne[1]);
++    GGML_ASSERT(weights->ne[0] == FRONK_ROUTED && weights->ne[1] == x->ne[1]);
++    GGML_ASSERT(ggml_is_contiguous(x) && ggml_is_contiguous(ids) && ggml_is_contiguous(weights));
++    std::lock_guard<std::mutex> lock(socket_mu);
++    overlap_start = g_prof.on ? profile::now() : 0;
++    if (g_prof.on) g_prof.enter(L.il, overlap_start);
++    if (fronk_submit(L.il, x->ne[1], (const float *) x->data, (const int32_t *) ids->data,
++                     (const float *) weights->data, nullptr)) {
++        fprintf(stderr, "llama-fronk: submit failed at layer %d\n", L.il);
++        abort();
++    }
++    memset(dst->data, 0, ggml_nbytes(dst));
++}
++
++void fronk_collect_op(ggml_tensor * dst, int ith, int, void * userdata) {
++    if (ith != 0) return;
++    const layer_ctx & L = *(const layer_ctx *) userdata;
++    std::lock_guard<std::mutex> lock(socket_mu);
++    uint32_t missing = 0;
++    const unsigned n_tok = (unsigned) dst->ne[1];
++    const int rc = fronk_collect(L.il, n_tok, (float *) dst->data, &missing);
++    if (rc == 1) {
++        const double t0 = profile::now();
++        boat_begin(L);
++        boat_kept_call(L, n_tok, (float *) dst->data);
++        boat_end(t0, n_tok);
++    } else if (rc || missing) {
++        fprintf(stderr, "llama-fronk: collect failed at layer %d\n", L.il);
++        abort();
++    } else {
++        boat_off();
++        boat_check(L, n_tok, (const float *) dst->data);
++    }
++    if (g_prof.on) g_prof.exit(L.il, overlap_start, profile::now(), dst->ne[1]);
++}
++
++void fronk_op(ggml_tensor * dst, int ith, int nth, void * userdata) {
++    const layer_ctx & L = *(const layer_ctx *) userdata;
++    const ggml_tensor * x   = dst->src[0];
++    const ggml_tensor * sel = dst->src[1];
++    const ggml_tensor * wts = dst->src[2];
++    const int64_t n_embd  = x->ne[0];
++    const int64_t n_tok   = x->ne[1];
++    const int     n_used  = (int) sel->ne[0];
++    float * y = (float *) dst->data;
++
++    switch (fronk_mode()) {
++        case mode::zero:
++            if (ith == 0) memset(y, 0, ggml_nbytes(dst));
++            return;
++        case mode::sleep: {
++            if (ith != 0) return;
++            static const double wait_s = [] { const char * v = getenv("FRONK_MOE_LOOPBACK"); return (v[5] == ':' ? atof(v + 6) : 3000.0) * 1e-6; }();
++            const double t0 = profile::now();
++            if (g_prof.on) g_prof.enter(L.il, t0);
++            while (profile::now() - t0 < wait_s) { }
++            memset(y, 0, ggml_nbytes(dst));
++            if (g_prof.on) g_prof.exit(L.il, t0, profile::now(), (long) n_tok);
++            return;
++        }
++        case mode::ref:
++            for (int64_t t = ith; t < n_tok; t += nth) {
++                ref_token(L, (const float *) ((const char *) x->data + t * x->nb[1]),
++                          (const int32_t *) ((const char *) sel->data + t * sel->nb[1]),
++                          (const float *) ((const char *) wts->data + t * wts->nb[1]),
++                          n_used, y + t * n_embd);
++            }
++            return;
++        case mode::socket: {
++            if (ith != 0) return;
++            if (n_embd != FRONK_HIDDEN || n_used != FRONK_ROUTED) {
++                fprintf(stderr, "llama-fronk: expected %d hidden and %d routed, got %lld and %d\n",
++                        FRONK_HIDDEN, FRONK_ROUTED, (long long) n_embd, n_used);
++                abort();
++            }
++            std::lock_guard<std::mutex> lock(socket_mu);
++            const double t0 = g_prof.on ? profile::now() : 0;
++            if (g_prof.on) g_prof.enter(L.il, t0);
++            uint32_t missing = 0;
++            // NULL shared gate: llama.cpp adds the shared expert itself.
++            const int rc = fronk_moe((unsigned) L.il, (unsigned) n_tok, (const float *) x->data,
++                                     (const int32_t *) sel->data, (const float *) wts->data, nullptr, y, &missing);
++            if (rc == 1) {
++                // The lifeboat: every token of this call, from the op's own inputs.
++                const float * xs = (const float *) x->data; const int32_t * es = (const int32_t *) sel->data;
++                const float * ws = (const float *) wts->data;
++                const double tb = profile::now();
++                boat_begin(L);
++                boat_call(L, (unsigned) n_tok,
++                          [&](unsigned t) { return xs + (size_t) t * FRONK_HIDDEN; },
++                          [&](unsigned t, unsigned j) { return (int64_t) es[(size_t) t * FRONK_ROUTED + j]; },
++                          [&](unsigned t, unsigned j) { return ws[(size_t) t * FRONK_ROUTED + j]; }, y);
++                boat_end(tb, (unsigned) n_tok);
++                missing = 0;
++            } else if (rc) {
++                fprintf(stderr, "llama-fronk: expert call failed at layer %d\n", L.il);
++                abort();  // never continue with a partial sum
++            } else {
++                boat_off();
++            }
++            if (missing) {
++                fprintf(stderr, "llama-fronk: layer %d missing nodes 0x%x\n", L.il, missing);
++                abort();
++            }
++            if (g_prof.on) g_prof.exit(L.il, t0, profile::now(), (long) n_tok);
++            return;
++        }
++        case mode::off:
++            return;
++    }
++}
++
++}  // namespace
++
++bool llama_fronk_wants(int il, int n_trunk) {
++    return fronk_mode() != mode::off && il >= 0 && il < n_trunk && il < 256;
++}
++
++ggml_tensor * llama_fronk_moe(ggml_context * ctx, ggml_tensor * cur, ggml_tensor * selected,
++                              ggml_tensor * weights, ggml_tensor * up_exps, ggml_tensor * gate_exps,
++                              ggml_tensor * down_exps, int il) {
++    g_layers[il] = { il, up_exps, gate_exps, down_exps };
++    ggml_tensor * args[3] = {
++        ggml_cont(ctx, cur),
++        ggml_cont(ctx, selected),
++        ggml_cont(ctx, ggml_reshape_2d(ctx, weights, selected->ne[0], selected->ne[1])),
++    };
++    const int n_tasks = fronk_mode() == mode::ref ? GGML_N_TASKS_MAX : 1;
++    return ggml_custom_4d(ctx, GGML_TYPE_F32, cur->ne[0], cur->ne[1], 1, 1, args, 3,
++                          llama_fronk_overlap(cur->ne[1]) ? fronk_send_op : fronk_op, n_tasks, &g_layers[il]);
++}
++
++bool llama_fronk_overlap(int64_t n_tokens) {
++    const char * flag = getenv("FRONK_MOE_OVERLAP");
++    return flag && !strcmp(flag, "1") && fronk_mode() == mode::socket && n_tokens > 0 && n_tokens <= FRONK_BURST;
++}
++
++ggml_tensor * llama_fronk_finish(ggml_context * ctx, ggml_tensor * sent, ggml_tensor * shared, int il) {
++    GGML_ASSERT(il >= 0 && il < 256 && llama_fronk_overlap(sent->ne[1]));
++    // The dependency waits for shared work without copying its full output to CPU.
++    ggml_tensor * args[2] = { sent, shared ? ggml_view_1d(ctx, shared, 1, 0) : nullptr };
++    return ggml_custom_4d(ctx, GGML_TYPE_F32, sent->ne[0], sent->ne[1], 1, 1, args, shared ? 2 : 1,
++                          fronk_collect_op, 1, &g_layers[il]);
++}
+diff --git a/src/llama-fronk.h b/src/llama-fronk.h
+new file mode 100644
+index 0000000..3de51a8
+--- /dev/null
++++ b/src/llama-fronk.h
+@@ -0,0 +1,34 @@
++// llama-fronk.h - routed experts of Qwen3.8-Flash-Next on the Fronk cluster.
++//
++// build_moe_ffn keeps the router (softmax, top 10, normalized weights) and, for
++// the 48 trunk layers of qwen4exp, hands the routed-expert computation to one
++// custom op. The op runs on the CPU backend and is chosen by environment:
++//   FRONK_MOE_SOCKET=PATH     send x, expert ids and weights to the Fronk head
++//                             (client/fronk_client.h); the shared expert stays in
++//                             llama.cpp, so its gate in the request is 0
++//   FRONK_MOE_LOOPBACK=ref    compute the routed sum here from the model's own
++//                             expert tensors with ggml's reference dequantizers
++//                             (slow; for parity against the unhooked graph)
++//                             Run it with --no-repack: on the CPU llama.cpp may
++//                             repack expert weights into its own layout, which
++//                             this path does not read.
++//   FRONK_MOE_LOOPBACK=zero   return zeros (wrong output; measures the cost of
++//                             leaving the GPU graph once per layer)
++// Without either variable the graph is unchanged.
++#pragma once
++
++#include "ggml.h"
++
++// True when the routed experts of trunk layer il (of n_trunk) go through the hook.
++bool llama_fronk_wants(int il, int n_trunk);
++
++// cur [n_embd, n_tokens] F32, selected [n_used, n_tokens] I32,
++// weights [n_used, n_tokens] F32 (normalized and scaled as build_moe_ffn does).
++// Returns the routed sum [n_embd, n_tokens] F32.
++ggml_tensor * llama_fronk_moe(ggml_context * ctx, ggml_tensor * cur, ggml_tensor * selected,
++                              ggml_tensor * weights, ggml_tensor * up_exps, ggml_tensor * gate_exps,
++                              ggml_tensor * down_exps, int il);
++
++// Opt-in overlap for decode-sized batches; larger prefills use the synchronous path.
++bool llama_fronk_overlap(int64_t n_tokens);
++ggml_tensor * llama_fronk_finish(ggml_context * ctx, ggml_tensor * sent, ggml_tensor * shared, int il);
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index edf1ca7..f730bea 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -1,4 +1,5 @@
+ #include "llama-graph.h"
++#include "llama-fronk.h"
+ 
+ #include "llama-impl.h"
+ #include "llama-model.h"
+@@ -2395,6 +2396,15 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+     //call early so that topk-moe can be used
+     ggml_build_forward_expand(gf, weights);
+ 
++    // fronk: the routed experts of qwen4exp's trunk layers run on the Fronk
++    // cluster (or a local check path); see llama-fronk.h. The router above is
++    // unchanged; the shared expert is added by the caller as before.
++    if (arch == LLM_ARCH_QWEN4EXP && llama_fronk_wants(il, (int) hparams.n_layer()) && up_exps && gate_exps) {
++        ggml_tensor * routed = llama_fronk_moe(ctx0, cur, selected_experts, weights, up_exps, gate_exps, down_exps, il);
++        cb(routed, "ffn_moe_out", il);
++        return routed;
++    }
++
+     // the experts of host-resident layers may be read from the MoE cache
+     ggml_tensor * slots = build_moe_cache_slots(selected_experts, up_exps, gate_exps, down_exps, gate_up_exps, il);
+ 
+diff --git a/src/models/qwen4exp.cpp b/src/models/qwen4exp.cpp
+index e4848cb..be2767f 100644
+--- a/src/models/qwen4exp.cpp
++++ b/src/models/qwen4exp.cpp
+@@ -1,4 +1,5 @@
+ #include "models.h"
++#include "llama-fronk.h"
+ #include "llama-impl.h"
+ #include "llama-memory-hybrid-idx.h"
+ #include "llama-memory-recurrent.h"
+@@ -577,6 +578,56 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
+     res->t_logits = cur;
+ }
+ 
++// The draft file repeats the target model's token table and output head byte for byte
++// (710 MB for Qwen3.8-Flash-Next). When this context drafts for a target whose two
++// tensors have the same shape, type and first and last bytes, the draft graph reads the
++// target's, which are in memory for the trunk anyway, and its own copies stay on disk.
++// A draft is always verified by the target, so a wrong guess could only cost drafts.
++// FRONK_MTP_OWN_TABLES=1 keeps the draft model on its own copies.
++static const llama_model * mtp_shared_model(const llama_model & model, const llama_cparams & cparams) {
++    static const bool own = getenv("FRONK_MTP_OWN_TABLES") != nullptr;
++    if (own || !cparams.ctx_tables) {
++        return nullptr;
++    }
++    const llama_model * other = llama_get_model(cparams.ctx_tables);
++    if (!other || other == &model || !model.tok_embd || !model.output || !other->tok_embd || !other->output) {
++        return nullptr;
++    }
++    // a model loaded only to measure its memory has no buffers: no answer is kept for it
++    if (!model.tok_embd->buffer || !model.output->buffer || !other->tok_embd->buffer || !other->output->buffer) {
++        return nullptr;
++    }
++    // one answer for each pair of loaded models
++    static const llama_model * asked_model = nullptr;
++    static const llama_model * asked_other = nullptr;
++    static bool answer = false;
++    if (asked_model != &model || asked_other != other) {
++        auto same = [](ggml_tensor * a, ggml_tensor * b) {
++            if (a->type != b->type || !ggml_are_same_shape(a, b)) {
++                return false;
++            }
++            const size_t n = ggml_nbytes(a);
++            const size_t k = n < 4096 ? n : 4096;
++            std::vector<uint8_t> x(k), y(k);
++            for (const size_t off : { (size_t) 0, n - k }) {
++                ggml_backend_tensor_get(a, x.data(), off, k);
++                ggml_backend_tensor_get(b, y.data(), off, k);
++                if (memcmp(x.data(), y.data(), k) != 0) {
++                    return false;
++                }
++            }
++            return true;
++        };
++        answer = same(model.tok_embd, other->tok_embd) && same(model.output, other->output) &&
++                 (model.output_s == nullptr) == (other->output_s == nullptr);
++        asked_model = &model;
++        asked_other = other;
++        LLAMA_LOG_WARN("%s: the draft model %s the target\x27s token table and output head\n", __func__,
++                answer ? "shares" : "keeps its own copies, not");
++    }
++    return answer ? other : nullptr;
++}
++
+ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_graph_params & params) :
+     graph(model, params, no_build{}) {
+     GGML_ASSERT(hparams.n_layer_nextn == 1 && "qwen4exp MTP has a single block");
+@@ -606,9 +657,11 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
+     ggml_set_input(inp->h);
+     ggml_set_name(inp->h, "mtp_h_input");
+ 
++    const llama_model * shared = mtp_shared_model(model, cparams);
++
+     ggml_tensor * tok_embd;
+     if (ubatch.token) {
+-        tok_embd = ggml_get_rows(ctx0, model.tok_embd, inp->tokens);
++        tok_embd = ggml_get_rows(ctx0, shared ? shared->tok_embd : model.tok_embd, inp->tokens);
+     } else {
+         tok_embd = inp->embd;
+     }
+@@ -668,7 +721,20 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
+     cb(cur, "result_norm", -1);
+     res->t_embd = cur;
+ 
+-    cur = build_lora_mm(model.output, cur, model.output_s);
++    // FRONK_MTP_VOCAB=K: the draft head scores only the first K tokens of the vocabulary (the
++    // others get -1e30). Drafts are verified by the full model, so this changes only how many
++    // are accepted, never the text; it reads K rows of the output head instead of all of them.
++    ggml_tensor * out_w = shared ? shared->output   : model.output;
++    ggml_tensor * out_s = shared ? shared->output_s : model.output_s;
++    static const int64_t draft_vocab = [] { const char * v = getenv("FRONK_MTP_VOCAB"); return v ? (int64_t) atoll(v) : (int64_t) 0; }();
++    if (draft_vocab > 0 && draft_vocab < out_w->ne[1] && out_s == nullptr) {
++        ggml_tensor * w    = ggml_view_2d(ctx0, out_w, out_w->ne[0], draft_vocab, out_w->nb[1], 0);
++        ggml_tensor * lk   = ggml_mul_mat(ctx0, w, cur);
++        ggml_tensor * rest = ggml_fill(ctx0, ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, out_w->ne[1] - draft_vocab, lk->ne[1]), -1e30f);
++        cur = ggml_concat(ctx0, lk, rest, 0);
++    } else {
++        cur = build_lora_mm(out_w, cur, out_s);
++    }
+     cb(cur, "result_output", -1);
+     res->t_logits = cur;
+ }
+@@ -1261,6 +1327,9 @@ ggml_tensor * llama_model_qwen4exp::graph::build_layer_ffn(ggml_tensor * cur, co
+             model.layers[il].ffn_gate_exps_s,
+             model.layers[il].ffn_down_exps_s);
+     cb(moe_out, "ffn_moe_out", il);
++    const bool overlap = llama_fronk_overlap(cur->ne[1]) && llama_fronk_wants(il, hparams.n_layer()) &&
++                         model.layers[il].ffn_up_exps && model.layers[il].ffn_gate_exps;
++    if (overlap) ggml_build_forward_expand(gf, moe_out);
+ 
+     // shared experts, as in the Qwen3Next reference
+     if (model.layers[il].ffn_up_shexp != nullptr) {
+@@ -1283,10 +1352,11 @@ ggml_tensor * llama_model_qwen4exp::graph::build_layer_ffn(ggml_tensor * cur, co
+         ffn_shexp = ggml_mul(ctx0, ffn_shexp, shared_gate);
+         cb(ffn_shexp, "ffn_shexp_gated", il);
+ 
++        if (overlap) moe_out = llama_fronk_finish(ctx0, moe_out, ffn_shexp, il);
+         cur = ggml_add(ctx0, moe_out, ffn_shexp);
+         cb(cur, "ffn_out", il);
+     } else {
+-        cur = moe_out;
++        cur = overlap ? llama_fronk_finish(ctx0, moe_out, nullptr, il) : moe_out;
+     }
+ 
+     return cur;
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index 48f1e93..39ca1fc 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -67,6 +67,23 @@ static common_speculative_output_limits server_output_limits(const common_params
+     return result;
+ }
+ 
++// fronk: FRONK_PASS_PROFILE=1 prints, every 200 passes, where the time of a generating pass goes
++struct fronk_pass_profile {
++    bool on = getenv("FRONK_PASS_PROFILE") != nullptr;
++    double decode = 0, process = 0, draft = 0, ckpt = 0, total = 0;
++    long n = 0; int64_t last = 0;
++    static int64_t now() { return ggml_time_us(); }
++    void pass_start() {
++        const int64_t t = now();
++        if (last && t - last < 2000000) { total += (t - last) / 1000.0; if (++n % 200 == 0) {
++            fprintf(stderr, "fronk pass profile (%ld passes): pass %.1f ms = target decode %.1f + draft-model process %.1f + drafting %.1f + checkpoint %.1f + rest %.1f\n",
++                    n, total / n, decode / n, process / n, draft / n, ckpt / n, (total - decode - process - draft - ckpt) / n);
++            decode = process = draft = ckpt = total = 0; n = 0; } }
++        last = t;
++    }
++};
++static fronk_pass_profile g_fronk_pass;
++
+ // a checkpoint restore dropped tokens the target had accepted - re-accept them rather than verify again
+ static std::vector<llama_token> server_accept_replay(
+         common_sampler * smpl,
+@@ -592,6 +609,11 @@ struct server_slot {
+             n_draft_max = std::min(n_draft_max, n_remaining() - 1);
+         }
+ 
++        // fronk: the request's speculative.n_max (its default is the launch value)
++        if (task->params.speculative.draft.n_max > 0) {
++            n_draft_max = std::min(n_draft_max, task->params.speculative.draft.n_max);
++        }
++
+         SLT_DBG(*this, "max possible draft: %d\n", n_draft_max);
+ 
+         return n_draft_max;
+@@ -1081,6 +1103,7 @@ private:
+     llama_context * ctx_tgt = nullptr;
+ 
+     server_batch batch;
++    size_t prompt_cursor = 0;
+ 
+     llama_model   * model_dft = nullptr;
+     llama_context * ctx_dft   = nullptr;
+@@ -3901,6 +3924,8 @@ private:
+                             /* .temp     = */ slot.task->params.sampling.temp,
+                             /* .seed     = */ slot.task->params.sampling.seed,
+                         };
++                        common_speculative_get_draft_params(spec.get(), slot.id).p_min = slot.task->params.speculative.draft.p_min;
++                        common_speculative_get_draft_params(spec.get(), slot.id).p_chain = slot.task->params.speculative.draft.p_chain;
+ 
+                         drafting.push_back(&slot);
+                     }
+@@ -3910,12 +3935,15 @@ private:
+ 
+         // generate the actual drafts (if any)
+         if (!drafting.empty()) {
++            const int64_t t_draft = fronk_pass_profile::now();
+             queue_tasks.yield_to_queue([&]() {
+                 common_speculative_draft(spec.get());
+             });
++            if (g_fronk_pass.on) g_fronk_pass.draft += (fronk_pass_profile::now() - t_draft) / 1000.0;
+         }
+ 
+         // make checkpoints if needed
++        const int64_t t_ckpt = fronk_pass_profile::now();
+         iterate(drafting, [&](server_slot & slot) {
+             auto & draft = slot.spec_draft;
+             auto & ckpt  = slot.spec_ckpt;
+@@ -3963,6 +3991,8 @@ private:
+             }
+         });
+ 
++        if (g_fronk_pass.on) g_fronk_pass.ckpt += (fronk_pass_profile::now() - t_ckpt) / 1000.0;
++
+         // update the batch with the sampled/drafted tokens
+         iterate(generating, [&](server_slot & slot) {
+             slot.handle_last_sampled_token(batch);
+@@ -3979,7 +4009,16 @@ private:
+         if (params_base.cont_batching || batch.size() == 0) {
+             bool add_ok = true; // false means the batch is full, skip remaining slots
+ 
+-            iterate(slots, [&](server_slot & slot) {
++            // Rotate prompt admission so a long prefill cannot starve another slot.
++            std::vector<server_slot *> prompting;
++            prompting.reserve(slots.size());
++            for (size_t i = 0; i < slots.size(); ++i) {
++                prompting.push_back(&slots[(prompt_cursor + i) % slots.size()]);
++            }
++            if (!slots.empty()) {
++                prompt_cursor = (prompt_cursor + 1) % slots.size();
++            }
++            iterate(prompting, [&](server_slot & slot) {
+                 if (!add_ok || batch.size() >= n_batch) {
+                     return; // batch is full, skip remaining slots
+                 }
+@@ -4689,12 +4728,14 @@ private:
+         // yield to the queue, so we can still handle metrics tasks while decoding
+         // note: the sync is done here too, so that the wait is also covered by the yield
+         int ret = 0;
++        const int64_t t_decode = g_fronk_pass.on ? (g_fronk_pass.pass_start(), fronk_pass_profile::now()) : 0;
+         queue_tasks.yield_to_queue([&]() {
+             ret = llama_process(ctx_tgt, LLAMA_PROCESS_TYPE_DECODE, batch.view.get());
+             if (ret == 0 && has_output) {
+                 llama_synchronize(ctx_tgt);
+             }
+         });
++        if (g_fronk_pass.on) g_fronk_pass.decode += (fronk_pass_profile::now() - t_decode) / 1000.0;
+ 
+         if (ret != 0) {
+             {
+@@ -4754,9 +4795,11 @@ private:
+         //       ref: https://github.com/ggml-org/llama.cpp/pull/22728#issuecomment-4400925384
+         if (spec) {
+             bool ok = true;
++            const int64_t t_process = fronk_pass_profile::now();
+             queue_tasks.yield_to_queue([&]() {
+                 ok = common_speculative_process(spec.get(), batch.view);
+             });
++            if (g_fronk_pass.on) g_fronk_pass.process += (fronk_pass_profile::now() - t_process) / 1000.0;
+ 
+             if (!ok) {
+                 SRV_ERR("%s", "failed to process speculative batch\n");
+@@ -4956,6 +4999,16 @@ private:
+ 
+                 GGML_ASSERT(accepted.size() >= 1);
+ 
++                {   // fronk: FRONK_DRAFT_LOG=1 writes each verified draft: its tokens' probabilities and how many were kept
++                    static const bool draft_log = getenv("FRONK_DRAFT_LOG") != nullptr;
++                    if (draft_log && !slot.spec_is_replay) {
++                        const auto & probs = common_speculative_get_draft_params(spec.get(), slot.id).probs;
++                        std::string line;
++                        for (float p : probs) { char b[16]; snprintf(b, sizeof(b), "%.3f,", p); line += b; }
++                        fprintf(stderr, "fronk draft: n=%zu kept=%zu p=%s\n", slot.spec_draft.size(), accepted.size() - 1, line.c_str());
++                    }
++                }
++
+                 const uint32_t n_rollback = slot.spec_draft.size() + 1 - accepted.size();
+ 
+                 // the recurrent snapshots are only guaranteed for batches of up to n_rs_seq + 1 tokens, so a longer draft uses its checkpoint
+diff --git a/tools/server/server-schema.cpp b/tools/server/server-schema.cpp
+index 0a14a96..2f57fce 100644
+--- a/tools/server/server-schema.cpp
++++ b/tools/server/server-schema.cpp
+@@ -196,21 +196,24 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
+     // Speculative decoding params
+     //
+ 
+-    // TODO: to keep things simple, we disable speculative parameter adjustments for now
+-#if 0
++    // fronk: a request may set its own draft length and confidence threshold (n_min stays the launch value)
++#if 1
+     // TODO: for now, be able to adjust only the draft-model based speculative parameters
+     add((new field_num("speculative.n_max", params.speculative.draft.n_max))
+         ->set_hard_limits(0, INT32_MAX)
+         ->set_desc("Maximum number of tokens to draft during speculative decoding"));
+ 
+-    add((new field_num("speculative.n_min", params.speculative.draft.n_min))
+-        ->set_hard_limits(0, INT32_MAX)
+-        ->set_desc("Minimum number of draft tokens to use for speculative decoding");
+ 
+     add((new field_num("speculative.p_min", params.speculative.draft.p_min))
+         ->set_hard_limits(0.0f, 1.0f)
+         ->set_desc("Minimum speculative decoding probability for draft tokens (0 = greedy)"));
+ 
++    add((new field_num("speculative.p_chain", params.speculative.draft.p_chain))
++        ->set_hard_limits(-1.0f, 1.0f)
++        ->set_desc("Stop a draft when the product of its tokens' probabilities falls below this (0 = off, -1 = launch value)"));
++#endif
++#if 0   // the other speculative fields stay off: some do not build (uint16 values)
++
+ 
+     add((new field_str("speculative.type"))
+         ->set_desc("Speculative decoding method (for debugging and research purposes)")

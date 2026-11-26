@@ -3,6 +3,7 @@
  * identity confirmation. UDP probes require that live authenticated link.
  * Loopback uses multicast HELLO because Darwin lo0 does not deliver broadcast.
  */
+#include "layout.h"
 #include "wire.h"
 #include "connection.h"
 #include "control.h"
@@ -103,24 +104,60 @@ static int discover(const fr_config *cfg, fr_connection *r, const unsigned char 
 }
 static int authenticate(const fr_config *cfg, fr_connection *r, unsigned index) {
     fr_link *l=&r->links[index]; char response[RESP_MAX_MESSAGE], request[128]; resp_value v[RESP_MAX_VALUES];
-    l->fd=net_tcp_connect_from(l->ip,l->identity.control_port,3000,l->via.address,l->via.index);
-    if (l->fd<0) return -1;
+    /* A node that answered the discovery is there. macOS refuses the first connections of
+     * a program it has just seen rebuilt, and a USB network adapter can be deaf for half
+     * a second: ask a few times before leaving the node out of the plan. */
+    for (unsigned attempt=0;;++attempt) {
+        l->fd=net_tcp_connect_from(l->ip,l->identity.control_port,3000,l->via.address,l->via.index);
+        if (l->fd>=0 || attempt==5 || (errno!=EHOSTUNREACH && errno!=EHOSTDOWN && errno!=ENETUNREACH && errno!=ENETDOWN && errno!=ECONNREFUSED && errno!=ECONNRESET)) break;
+        usleep(500000);
+    }
+    if (l->fd<0) { fprintf(stderr,"connection: %s: no control connection from %s (%s)\n",l->identity.name,l->via.address,strerror(errno)); return -1; }
     int64_t now=net_now_ns(); if (now<0) return -1;
     int64_t deadline=now/1000000+3000;
     const char *error=control_authenticate(l->fd,cfg->password,response,v,deadline);
     if (error) { fprintf(stderr,"connection: %s: %s\n",l->identity.name,error); return -1; }
     l->authenticated=1; int port=net_port(r->udp); if (port<0) return -1;
     int n=snprintf(request,sizeof(request),"LINK %" PRIu32 " %d %u\r\n",r->session,port,index);
-    if (n<0 || (size_t)n>=sizeof(request) || control_exchange(l->fd,request,(size_t)n,response,v,deadline)) return -1;
-    if (v[0].type!=RESP_ARRAY || v[0].len!=4) return -1;
+    /* A node still held by a head that vanished without closing tests that head when
+     * asked (node.c) and is free within seconds: ask again for a while. A node held by
+     * a head that is alive goes on refusing, and this head gives up as before. */
+    for (unsigned attempt=0;;++attempt) {
+        now=net_now_ns(); if (now<0) return -1;
+        deadline=now/1000000+3000;
+        if (n<0 || (size_t)n>=sizeof(request) || control_exchange(l->fd,request,(size_t)n,response,v,deadline)) {
+            fprintf(stderr,"connection: %s did not answer LINK\n",l->identity.name); return -1;
+        }
+        if (!(v[0].type==RESP_ERROR && v[0].len>=4 && !memcmp(v[0].data,"BUSY",4)) || attempt==12) break;
+        if (!attempt) { fprintf(stderr,"connection: %s is held by an earlier head and is testing whether that head is alive; asking again for 12 s\n",l->identity.name); fflush(stderr); }
+        usleep(1000000);
+    }
+    if (v[0].type!=RESP_ARRAY || v[0].len!=4) {
+        /* e.g. "link already owned by another connection": an earlier head that vanished
+         * without closing (a cable moved) still holds this node; restart its service. */
+        if (v[0].type==RESP_ERROR) fprintf(stderr,"connection: %s refused LINK: %.*s\n",l->identity.name,(int)(v[0].len<160?v[0].len:160),v[0].data);
+        return -1;
+    }
     char id[17]; uint64_t confirmed=0;
     if (v[4].type!=RESP_BULK || v[4].is_null || v[4].len!=16) return -1;
     memcpy(id,v[4].data,16); id[16]=0;
     if (identity_parse(id,&confirmed) || confirmed!=l->identity.id) return -1;
-    return v[0].type==RESP_ARRAY && v[0].len==4 && v[1].type==RESP_BULK && !v[1].is_null &&
-        v[1].len==strlen(l->identity.name) && !memcmp(v[1].data,l->identity.name,v[1].len) &&
-        v[2].type==RESP_INTEGER && v[2].integer==l->identity.control_port &&
-        v[3].type==RESP_INTEGER && v[3].integer==l->identity.data_port ? 0:-1;
+    if (!(v[0].type==RESP_ARRAY && v[0].len==4 && v[1].type==RESP_BULK && !v[1].is_null &&
+          v[1].len==strlen(l->identity.name) && !memcmp(v[1].data,l->identity.name,v[1].len) &&
+          v[2].type==RESP_INTEGER && v[2].integer==l->identity.control_port &&
+          v[3].type==RESP_INTEGER && v[3].integer==l->identity.data_port)) return -1;
+    /* Only after the LINK reply is checked: the next exchange reuses v. */
+    /* A GSQ model: the node computes GSQ units with its gsq backend (layout.h).
+     * Native heads send nothing, so older nodes keep working with them. */
+    if (fr_layout()!=FR_LAYOUT_NATIVE) {
+        n=snprintf(request,sizeof(request),"LAYOUT %s\r\n",fr_layout_name(fr_layout()));
+        if (n<0 || (size_t)n>=sizeof(request) || control_exchange(l->fd,request,(size_t)n,response,v,deadline) ||
+            v[0].type!=RESP_STRING || v[0].len!=2 || memcmp(v[0].data,"OK",2)) {
+            fprintf(stderr,"connection: %s cannot compute %s units; update and rebuild fronk there (gsq backend)\n",l->identity.name,fr_layout_name(fr_layout()));
+            return -1;
+        }
+    }
+    return 0;
 }
 static int source(const fr_link *l, const struct sockaddr_in *peer) {
     struct sockaddr_in expected;
@@ -290,9 +327,21 @@ int connection_run(const fr_config *cfg,fr_connection *r,FILE *output) {
             fr_link *l=&scan->links[i]; unsigned measured=0,skip=0;
             for (unsigned j=0;!wired && j<r->path_count;++j) if (r->paths[j].identity.id==l->identity.id && r->paths[j].ready &&
                 (r->paths[j].via.type==FR_LINK_ETHERNET || r->paths[j].via.type==FR_LINK_THUNDERBOLT)) skip=1;
-            if (l->authenticated && !skip) for (unsigned kind=0;kind<3;++kind) {
-                if (measure(scan,i,kind)) break;
-                ++measured;
+            /* A probe train is one datagram of up to 21 kB. A machine busy loading the
+             * model, or a USB Ethernet adapter, can lose more than the ten that one
+             * measurement allows: measure again before leaving a node out, because a node
+             * left out means its units have no memory to go to. */
+            for (unsigned round=0;l->authenticated && !skip && measured<3 && round<4;++round) {
+                if (round) {
+                    fprintf(stderr,"connection: %s on %s lost %u probe trains of %u bytes; measuring again (%u of 3)\n",l->identity.name,via->name,
+                            l->losses[measured],probe_train_bytes(measured),round);
+                    memset(l->rtt,0,sizeof(l->rtt)); memset(l->losses,0,sizeof(l->losses)); measured=0;
+                    usleep(400000);
+                }
+                for (unsigned kind=0;kind<3;++kind) {
+                    if (measure(scan,i,kind)) break;
+                    ++measured;
+                }
             }
             if (r->path_count==FR_CONNECTION_PATHS) goto done;
             unsigned pi=r->path_count++; fr_path *path=&r->paths[pi];

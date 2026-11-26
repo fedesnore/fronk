@@ -1,4 +1,5 @@
-/* prep.h - lossless native units straight from the local Q4 GGUF.
+/* prep.h - lossless units straight from the local GGUF: native units from the
+ * ds4 Q4 file, or GSQ units from the GSQ-RCO IQ3_XXS shard (layout.h, gsq.h).
  * A unit is a deterministic gather of GGUF byte ranges (no requantization):
  * per layer, 512 routed slices (Q4_K gate rows, Q4_K up rows, MXFP4 down
  * columns) then the Q8_0 shared slice, exactly the native.h layout.
@@ -7,17 +8,23 @@
 #ifndef FR_PREP_H
 #define FR_PREP_H
 #include "native.h"
+#include "gsq.h"
+#include "layout.h"
 typedef struct {
     int fd; const unsigned char *map; uint64_t size,mtime;
     uint64_t gate[FR_LAYERS],up[FR_LAYERS],down[FR_LAYERS],sgate[FR_LAYERS],sup[FR_LAYERS],sdown[FR_LAYERS];
+    unsigned layout;   /* FR_LAYOUT_NATIVE or FR_LAYOUT_GSQ */
+    fr_gsq_gguf gsq;   /* the GSQ shard's own validated map (layout gsq) */
 } fr_gguf;
 typedef int (*fr_sink)(void *ctx,const void *data,size_t n);
-int fr_gguf_open(const char *path,fr_gguf *g); /* validates names, types and shapes */
+/* Validates names, types and shapes: the ds4 Q4 file, else the pinned GSQ-RCO
+ * shard. Sets this process's layout (fr_layout_set) to the file's. */
+int fr_gguf_open(const char *path,fr_gguf *g);
 void fr_gguf_close(fr_gguf *g);
 /* Copy one routed/shared slice from a validated GGUF. Returns its exact byte
  * count, or 0 for invalid coordinates/capacity. Useful for format audits. */
 size_t fr_slice_copy(const fr_gguf *g,unsigned block,unsigned layer,unsigned expert,void *out,size_t capacity);
-/* Emits exactly FR_NATIVE_BLOCK_BYTES in order; stops at the first sink error. */
+/* Emits exactly the layout's unit bytes in order; stops at the first sink error. */
 int fr_unit_stream(const fr_gguf *g,unsigned block,fr_sink sink,void *ctx);
 /* Per-unit SHA-256 hex, cached in DIR/manifest.txt keyed by GGUF size and mtime. */
 int fr_manifest(const fr_gguf *g,const char *dir,char hex[FR_BLOCKS][65]);

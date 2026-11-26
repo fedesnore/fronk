@@ -45,7 +45,10 @@ int hw_metal_probe(fr_hwinfo *h) {
  * resources are created at load/setup; run has one macOS 15 submission path,
  * an autorelease pool, unretained resource references and waitUntilCompleted.
  */
-#define MAX_EXPERTS (FR_MAX_BURST*FR_ACTIVE_ROUTED+1)
+/* The kernels, masks and buffers are built for 8 tokens; metal_run splits wider
+ * calls (FR_MAX_BURST) into 8-token chunks. */
+#define METAL_BURST 8
+#define MAX_EXPERTS (METAL_BURST*FR_ACTIVE_ROUTED+1)
 #define MSL(...) @#__VA_ARGS__
 static NSString *const source=@"#include <metal_stdlib>\n" MSL(
 using namespace metal;
@@ -281,7 +284,7 @@ kernel void reduce(constant Routing &r [[buffer(0)]], device const float *partia
 );
 #undef MSL
 
-typedef struct { uint32_t id,mask; float gate[FR_MAX_BURST]; } metal_expert;
+typedef struct { uint32_t id,mask; float gate[METAL_BURST]; } metal_expert;
 typedef struct { uint32_t burst,count,mask,slots[FR_BLOCKS]; metal_expert expert[MAX_EXPERTS]; } metal_routing;
 _Static_assert(sizeof(metal_expert)==40 && offsetof(metal_routing,expert)==92,"MSL routing layout");
 static struct {
@@ -338,11 +341,11 @@ static int finish_setup(void) {
             [fn release];
             if (!*pipelines[i] || [*pipelines[i] threadExecutionWidth]!=32 || [*pipelines[i] maxTotalThreadsPerThreadgroup]<128) goto failed;
         }
-        metal.input=buffer(sizeof(float)*FR_MAX_BURST*FR_HIDDEN);
+        metal.input=buffer(sizeof(float)*METAL_BURST*FR_HIDDEN);
         metal.routing=buffer(sizeof(metal_routing));
-        metal.hidden=buffer((size_t)FR_BLOCKS*MAX_EXPERTS*FR_MAX_BURST*FR_BLOCK_NEURONS*sizeof(float));
-        metal.partial=buffer((size_t)FR_BLOCKS*FR_MAX_BURST*FR_HIDDEN*sizeof(float));
-        metal.output=buffer(sizeof(float)*FR_MAX_BURST*FR_HIDDEN); metal.error=buffer(sizeof(uint32_t));
+        metal.hidden=buffer((size_t)FR_BLOCKS*MAX_EXPERTS*METAL_BURST*FR_BLOCK_NEURONS*sizeof(float));
+        metal.partial=buffer((size_t)FR_BLOCKS*METAL_BURST*FR_HIDDEN*sizeof(float));
+        metal.output=buffer(sizeof(float)*METAL_BURST*FR_HIDDEN); metal.error=buffer(sizeof(uint32_t));
         if (!metal.queue || !metal.input || !metal.routing || !metal.hidden || !metal.partial || !metal.output || !metal.error) goto failed;
         return FR_OK;
     failed:
@@ -485,7 +488,7 @@ static void keepalive_start(void) {
     if (!metal.side || !metal.scratch || pthread_create(&metal.keepalive_thread,NULL,keepalive_thread,NULL)) metal.keepalive_started=0;
 }
 static int prepare(const fr_req *req) {
-    if (!req || req->layer>=FR_LAYERS || req->burst<1 || req->burst>FR_MAX_BURST || fegetround()!=FE_TONEAREST) return FR_INVALID;
+    if (!req || req->layer>=FR_LAYERS || req->burst<1 || req->burst>METAL_BURST || fegetround()!=FE_TONEAREST) return FR_INVALID;
     for (unsigned t=0;t<req->burst;++t) {
         for (unsigned e=0;e<FR_ACTIVE_ROUTED;++e) {
             if (req->expert[t][e]>=FR_ROUTED_EXPERTS) return FR_INVALID;
@@ -526,11 +529,11 @@ static int prepare(const fr_req *req) {
         if (j==r->count) { r->expert[j].id=id; ++r->count; }
         r->expert[j].mask|=1u<<t; r->expert[j].gate[t]=req->gate[t][e];
     }
-    memcpy([metal.input contents],req->x,sizeof(req->x)); *(uint32_t *)[metal.error contents]=0;
+    memcpy([metal.input contents],req->x,METAL_BURST*sizeof(req->x[0])); *(uint32_t *)[metal.error contents]=0;
     return FR_OK;
 }
 static int metal_ssd_run(const fr_req *req,fr_part *out);
-static int metal_run(const fr_req *req,fr_part *out) {
+static int metal_run_narrow(const fr_req *req,fr_part *out) {
     if (metal.ssd_mask) return metal_ssd_run(req,out);
     if (!out) return FR_INVALID;
     double start=metal.device?stamp():0;
@@ -577,7 +580,7 @@ static int metal_run(const fr_req *req,fr_part *out) {
     double end=stamp();
     if (!rc && (gpu_start<commit || gpu_end<gpu_start || end<gpu_end)) rc=FR_IO;
     if (!rc) {
-        out->layer=req->layer; out->burst=req->burst; memcpy(out->y,[metal.output contents],sizeof(out->y));
+        out->layer=req->layer; out->burst=req->burst; memcpy(out->y,[metal.output contents],METAL_BURST*sizeof(out->y[0])); memset(out->y[METAL_BURST],0,(FR_MAX_BURST-METAL_BURST)*sizeof(out->y[0]));
         end=stamp(); ++metal.runs;
         metal.last=(fr_metal_sample){.ns={commit-start,gpu_start-commit,gpu_end-gpu_start,end-gpu_end,
                                          end-start-(gpu_end-gpu_start),end-start},
@@ -676,7 +679,7 @@ static int metal_ssd_run(const fr_req *req,fr_part *out) {
     }
     double elapsed=stamp()-begin;
     if (!rc) {
-        out->layer=req->layer; out->burst=req->burst; memcpy(out->y,[metal.output contents],sizeof(out->y));
+        out->layer=req->layer; out->burst=req->burst; memcpy(out->y,[metal.output contents],METAL_BURST*sizeof(out->y[0])); memset(out->y[METAL_BURST],0,(FR_MAX_BURST-METAL_BURST)*sizeof(out->y[0]));
         ++metal.runs;
         metal.last=(fr_metal_sample){.ns={0,0,gpu,0,elapsed-gpu,elapsed},.runs=metal.runs,
             .hot_allocations=metal.hot_allocations,.resources=metal.allocations,
@@ -727,6 +730,25 @@ static int metal_self_test(const char *dir) {
 }
 static int metal_bench(int burst_max,fr_costmodel *out) {
     return fr_bench_execute(burst_max,out);
+}
+/* Wider prompt calls run as consecutive 8-token chunks: correct, though they keep
+ * the 8-token cost per chunk. Externally serialized, so static storage is safe. */
+static int metal_run(const fr_req *req,fr_part *out) {
+    if (!req || !out) return FR_INVALID;
+    if (req->burst<=METAL_BURST) return metal_run_narrow(req,out);
+    if (req->burst>FR_MAX_BURST) return FR_INVALID;
+    static fr_req chunk; static fr_part part,whole;
+    memset(&whole,0,sizeof(whole)); whole.layer=req->layer; whole.burst=req->burst;
+    for (unsigned base=0;base<req->burst;base+=METAL_BURST) {
+        const unsigned n=req->burst-base<METAL_BURST?req->burst-base:METAL_BURST;
+        chunk.layer=req->layer; chunk.burst=n;
+        memcpy(chunk.expert,req->expert[base],n*sizeof(req->expert[0]));
+        memcpy(chunk.gate,req->gate[base],n*sizeof(req->gate[0]));
+        memcpy(chunk.x,req->x[base],n*sizeof(req->x[0]));
+        int rc=metal_run_narrow(&chunk,&part); if (rc) return rc;
+        memcpy(whole.y[base],part.y,n*sizeof(part.y[0]));
+    }
+    *out=whole; return FR_OK;
 }
 const fr_backend fr_metal={"metal",metal_probe,metal_load,metal_unload,metal_run,metal_bench,metal_self_test};
 const fr_backend fr_metal_ssd={"metal-ssd",metal_probe,metal_load,metal_unload,metal_run,metal_bench,metal_self_test};

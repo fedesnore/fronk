@@ -1,6 +1,7 @@
 /* Selection is a comparison of measured costs, never an architecture preference.
  * Linear extrapolation is needed only beyond the bounded five-block sweep.
  */
+#include "layout.h"
 #include "selection.h"
 #include "native.h"
 #include <math.h>
@@ -28,7 +29,10 @@ int selection_discover(const fr_hwinfo *hw,unsigned burst,int head,fr_selection 
     }
     if (!hw->translated) for (unsigned i=0;i<count;++i) {
         const fr_backend *b=fr_backend_find(names[i]); fr_hwinfo actual;
-        if (!b || (chosen[0] && strcmp(chosen,b->name))) continue;
+        if (!b || fr_backend_layout_of(b->name)!=fr_layout()) continue; /* each backend computes one unit layout */
+        /* The configured choice binds within its own layout: a node set to avx2 for
+         * native units still races its GSQ backends when the head says LAYOUT gsq. */
+        if (chosen[0] && fr_backend_layout_of(chosen)==fr_layout() && strcmp(chosen,b->name)) continue;
         int rc=b->probe(&actual);
         if (rc==FR_UNSUPPORTED) continue;
         if (rc) return -1;
@@ -52,6 +56,7 @@ const char *selection_chosen(void) { return chosen[0]?chosen:NULL; }
 const char *selection_recommend_cpu(const fr_hwinfo *hw) {
     const char *order[]={"avx2","neon","ref-q8"}; fr_hwinfo probe;
     if (!hw || hw->translated) return NULL;
+    if (fr_layout()==FR_LAYOUT_GSQ) { const fr_backend *g=fr_backend_find("gsq"); return g && !g->probe(&probe)?g->name:NULL; }
     for (unsigned i=0;i<sizeof(order)/sizeof(order[0]);++i) {
         const fr_backend *b=fr_backend_find(order[i]);
         if (b && !b->probe(&probe)) return b->name;
@@ -59,6 +64,7 @@ const char *selection_recommend_cpu(const fr_hwinfo *hw) {
     return "ref";
 }
 const char *selection_recommend(const fr_hwinfo *hw) {
+    if (fr_layout()==FR_LAYOUT_GSQ) return selection_recommend_cpu(hw);
     const fr_backend *metal=fr_backend_find("metal"); fr_hwinfo probe;
     if (hw && !hw->translated && metal && !metal->probe(&probe)) return metal->name;
     return selection_recommend_cpu(hw);
@@ -70,7 +76,9 @@ void selection_cache_identity(const char *identity) { snprintf(cache_identity,si
 const char *selection_cache_identity_get(void) { return cache_identity; }
 static void cache_path(const char *dir,const char *backend,unsigned b,unsigned burst,unsigned samples,char *out,size_t size) {
     char key[320]; unsigned char d[32]; char hex[65];
-    snprintf(key,sizeof(key),"%s|%s|native|%u|%u|%u",cache_identity,backend,b,burst,samples);
+    /* The unit layout at use time (LAYOUT may change it after setup): a native and
+     * a GSQ measurement never stand for each other. Native keys are unchanged. */
+    snprintf(key,sizeof(key),"%s|%s|%s|%u|%u|%u",cache_identity,backend,fr_layout_name(fr_layout()),b,burst,samples);
     sha256(key,strlen(key),d); for (unsigned i=0;i<32;++i) snprintf(hex+2*i,3,"%02x",d[i]);
     snprintf(out,size,"%s/bench/%s.txt",dir,hex);
 }
@@ -109,7 +117,7 @@ static int measure(const fr_backend *backend,unsigned b,unsigned burst,unsigned 
             }
         }
     }
-    if (progress) { fprintf(progress,"BENCH backend=%s blocks=%u burst=%u samples=%u%s (loads %.1f GB once)\n",backend->name,b,burst,probe?samples:FR_PLAN_SAMPLES,probe?"":" per width 1..4; short planning profile",b*(double)FR_NATIVE_BLOCK_BYTES/1e9); fflush(progress); }
+    if (progress) { fprintf(progress,"BENCH backend=%s blocks=%u burst=%u samples=%u%s (loads %.1f GB once)\n",backend->name,b,burst,probe?samples:FR_PLAN_SAMPLES,probe?"":" per width 1..4; short planning profile",b*(double)fr_unit_bytes()/1e9); fflush(progress); }
     struct timespec t0,t1; clock_gettime(CLOCK_MONOTONIC,&t0);
     if (fr_bench_measure_backend(backend,b,probe?samples:FR_PLAN_SAMPLES,4,probe?burst:0,1,NULL,NULL,cancel,r)) {
         if (cancel && atomic_load(cancel)) return -1; /* stopped, not failed: nothing saved */
@@ -228,6 +236,7 @@ uint64_t selection_capacity(const fr_hwinfo *h,const char *backend,int head) {
     if (!h || !known(backend) || h->translated) return 0;
     uint64_t bytes=h->available,reserve=head?h->head_reserve:h->margin;
     int hybrid=!strcmp(backend,"metal-ssd"),metal=hybrid || !strcmp(backend,"metal");
+    if (hybrid && fr_layout()!=FR_LAYOUT_NATIVE) return 0; /* SSD streaming reads native slices only */
     if (metal && !h->metal) return 0;
     if (metal) {
         if (bytes>h->metal_limit) bytes=h->metal_limit;
@@ -237,7 +246,7 @@ uint64_t selection_capacity(const fr_hwinfo *h,const char *backend,int head) {
         if (reserve>UINT64_MAX-extra || bytes<=reserve+extra) return 0;
         reserve+=extra;
     }
-    uint64_t blocks=bytes>reserve?(bytes-reserve)/FR_NATIVE_BLOCK_BYTES:0;
+    uint64_t blocks=bytes>reserve?(bytes-reserve)/fr_unit_bytes():0;
     if (head && h->head_fixed && h->head_fixed<blocks) blocks=h->head_fixed;
     if (hybrid) blocks+=FR_SSD_MAX_BLOCKS;
     return blocks>FR_BLOCKS?FR_BLOCKS:blocks;
@@ -249,7 +258,7 @@ int selection_fits(const fr_candidate *c,const fr_hwinfo *h,int head,unsigned bl
     if (!h->metal || h->translated) return 0;
     if (bytes>h->metal_limit) bytes=h->metal_limit;
     unsigned ram=blocks<c->ram_blocks?blocks:c->ram_blocks,ssd=blocks-ram;
-    uint64_t need=ram*FR_NATIVE_BLOCK_BYTES+c->cache_bytes+ssd*FR_NATIVE_LAYER_BYTES+(4ull<<20);
+    uint64_t need=ram*fr_unit_bytes()+c->cache_bytes+ssd*FR_NATIVE_LAYER_BYTES+(4ull<<20);
     return bytes>reserve && need<=bytes-reserve;
 }
 uint32_t selection_paged(const fr_candidate *c,uint32_t mask) {
@@ -279,7 +288,7 @@ int selection_add(fr_selection *s,const char *backend,unsigned capacity) {
     fr_candidate *c=&s->candidate[s->count++]; memset(c,0,sizeof(*c)); strcpy(c->name,backend); c->capacity=capacity; return 0;
 }
 static int valid_resident(unsigned b,uint64_t resident) {
-    return resident==b*FR_WEIGHT_BLOCK_BYTES || resident==b*FR_NATIVE_BLOCK_BYTES;
+    return resident==b*FR_WEIGHT_BLOCK_BYTES || resident==b*FR_NATIVE_BLOCK_BYTES || resident==b*fr_unit_bytes();
 }
 int selection_record(fr_selection *s,unsigned i,unsigned b,double p50,double p99,uint64_t resident) {
     if (!s || i>=s->count || !b || b>FR_SWEEP || b>s->candidate[i].capacity ||

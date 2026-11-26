@@ -171,14 +171,14 @@ details summary{cursor:pointer;color:var(--bondi);font-size:15px}
     <button %NODE_CONTROLS% class="btn" id="n-start">Start nodes</button>
     <button %NODE_CONTROLS% class="btn" id="n-status">Node status</button>
     <button %NODE_CONTROLS% class="btn" id="n-stop">Stop nodes</button>
-    <span class="field">Blocks on this Mac <input id="head-blocks" value="%head-blocks%" inputmode="numeric" aria-label="Blocks on this Mac"></span>
+    <span class="field">Max blocks on this Mac <input id="head-blocks" value="%head-blocks%" placeholder="Auto" inputmode="numeric" aria-label="Maximum blocks on this Mac" title="Leave empty for automatic capacity from available RAM. A number is a ceiling, not a forced assignment."></span>
     <button class="btn pri" id="start">Start head</button>
     <label class="field"><input id="auto" type="checkbox" style="width:auto" checked> proceed when the plan fits</label>
     <label class="field"><input id="refresh" type="checkbox" style="width:auto"> measure again</label>
   </div>
   <div class="actions" id="answers">
     <button class="btn ask" id="k-p" hidden>Proceed with this plan</button>
-    <button class="btn" id="k-m" hidden>Modified: run CONNECTION again</button>
+    <button class="btn" id="k-m" hidden>Reassign slices (restart head)</button>
     <button class="btn" id="k-r" hidden>Run the test again</button>
     <button class="btn" id="k-q" hidden>Quit the head</button>
     <button class="btn" id="stop" hidden>Stop head</button>
@@ -246,7 +246,7 @@ details summary{cursor:pointer;color:var(--bondi);font-size:15px}
 </main>
 
 <script>
-const T="%TOKEN%";let n=0,view=null,localT0=Date.now();
+const T="%TOKEN%";let liveToken=T;let n=0,view=null,localT0=Date.now();
 const $=id=>document.getElementById(id);
 const esc=t=>String(t??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const mmss=t=>{t=Math.max(0,Math.round(t));return t>=3600?Math.floor(t/3600)+'h '+String(Math.floor(t%3600/60)).padStart(2,'0')+'m':Math.floor(t/60)+':'+String(t%60).padStart(2,'0')};
@@ -254,9 +254,20 @@ document.querySelectorAll('nav .tabs button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('nav .tabs button').forEach(x=>x.setAttribute('aria-pressed',x===b));
   document.querySelectorAll('.v').forEach(v=>v.hidden=v.id!==b.dataset.v);});
 async function post(p,body){
-  try{const r=await fetch(p,{method:'POST',headers:{'X-Fronk-Token':T,'Content-Type':'application/json'},body:JSON.stringify(body)});
-    const j=await r.json();note(j.message||'',!r.ok||/first|cannot|must|not |wait/.test(j.message||''));return j;}
-  catch(e){note('The console is not reachable: is tools/fronk-web.py still running?',true);return {};}}
+  try{
+    const send=()=>fetch(p,{method:'POST',headers:{'X-Fronk-Token':liveToken,'Content-Type':'application/json'},body:JSON.stringify(body)});
+    let r=await send();
+    if(r.status===403){
+      // A console restart rotates its CSRF token; refresh only from this origin.
+      const page=await fetch('/',{cache:'no-store'});
+      const match=(await page.text()).match(/const T="([a-f0-9]{32})"/);
+      if(!page.ok||!match)throw new Error('Reload the console to reconnect.');
+      liveToken=match[1];r=await send();
+    }
+    const j=await r.json();
+    note(j.message||('HTTP '+r.status),!r.ok||/first|cannot|must|not |wait/.test(j.message||''));return j;
+  }catch(e){note(e.message||'The console is not reachable.',true);return {};}}
+
 function note(t,err){const e=$('note');e.textContent=t;e.classList.toggle('err',!!err);}
 let helpText='';
 $('copyhelp').onclick=e=>{e.preventDefault();navigator.clipboard.writeText(helpText).then(
@@ -266,9 +277,9 @@ $('n-start').onclick=()=>post('/nodes',{action:'start'});
 $('auto').onchange=()=>post('/auto',{on:$('auto').checked});
 $('n-status').onclick=()=>post('/nodes',{action:'status'});
 $('n-stop').onclick=()=>post('/nodes',{action:'stop'});
-$('start').onclick=()=>post('/start',{refresh:$('refresh').checked,head_blocks:$('head-blocks').value.trim()});
+$('start').onclick=()=>{const field=$('head-blocks'),body={refresh:$('refresh').checked};if(field.value.trim()!==field.defaultValue.trim())body.head_blocks=field.value.trim();post('/start',body)};
 for(const k of 'pmrq')$('k-'+k).onclick=()=>post('/key',{key:k});
-$('stop').onclick=()=>{if(confirm('Stop the head now? ds4 stops too; the nodes keep running.'))post('/stop',{});};
+$('stop').onclick=async()=>{note('Stopping head and inference engines…');$('stop').disabled=true;try{await post('/stop',{});}finally{$('stop').disabled=false;}};
 $('save').onclick=()=>{const b={};for(const k of ['model','burst','ds4','interfaces'])b[k]=$(k).value.trim();const s=$('secret').value;if(s)b.secret=s;post('/settings',b);};
 
 const PH=["CONNECTION","DISCOVERY","PLAN","FRONK","SELFTEST","TEST","REPORT"];
@@ -338,6 +349,8 @@ function draw(v){
   // headline
   let st=STORY[v.phase]||STORY.IDLE;
   if(v.waiting==='after')st=["Ready"+(v.timing.READY?" in "+mmss(+v.timing.READY):"")+" · "+(v.report.toks?v.report.toks+" tok/s":"report"),"The cluster is answering.","Open Chat to talk to the model. Run the test again for fresh numbers, or Quit to stop the head and ds4."];
+  if(v.running&&v.warmup?.status==='warming')st=["Preparing study tools","Loading the Harness prompt once.","The cluster is warming the tools cache. This avoids repeating the initial prompt processing when you open Studio rapido."];
+  if(v.running&&v.warmup?.status==='ready'&&v.waiting==='after')st[2]="Studio rapido tools are preloaded. You can open DeepSeek Harness on the M1 Pro.";
   if(failed)st=["Stopped at "+(NAMES[v.phase]||v.phase),"This cycle failed.","The reason is below. Fix it, then run CONNECTION again, or quit."];
   if(exited&&!failed)st=["Stopped","The head is not running.",v.lastline&&/exited with status 0/.test(v.lastline)?"It quit normally. Start it again when you are ready.":"It exited. The last lines of the raw output say why."];
   $('eyebrow').textContent=st[0];$('headline').textContent=st[1];$('sub').textContent=st[2];
@@ -367,13 +380,19 @@ function draw(v){
   if(v.phase==='TEST'&&v.running&&genProgress&&genProgress.phase==='prefill'){
     title='Reading the test prompt';subt=esc(genProgress.read+' / '+genProgress.new+' tokens'+(genProgress.rate?' · '+genProgress.rate+' tok/s':''));
   }
+  if(v.memory_guard&&['tripped','error'].includes(v.memory_guard.status)){
+    title='Stopped to protect RAM';subt=esc(v.failure||'The RAM guard stopped this head. Free memory before restarting.');
+    nowEl.classList.add('bad');spin.className='spin bad';
+  }
   $('nowtitle').innerHTML=title;$('nowsub').innerHTML=subt;$('nowtime').textContent=time;
   // live indicator
   $('dot').className='dot '+(v.running?(v.keys?'wait':'on'):'');
   $('livetext').textContent=v.running?(v.keys?'waiting for you':'head running · '+mmss(v.elapsed)):'head stopped';
+  if(v.running&&v.memory_guard?.status==='armed')$('livetext').textContent+=' · RAM guard on';
   // buttons: only what the head can take now
-  for(const k of 'pmrq')$('k-'+k).hidden=!v.keys.includes(k);
-  $('stop').hidden=v.observer||!v.running||v.keys.includes('q');
+  for(const k of 'pmr')$('k-'+k).hidden=v.observer||!v.keys.includes(k);
+  $('k-q').hidden=true;
+  $('stop').hidden=v.observer||!v.running;
   for(const id of ['n-start','n-stop','start'])$(id).disabled=v.running||v.observer;
   if(document.activeElement!==$('auto'))$('auto').checked=v.auto!==false;
   $('head-blocks').disabled=v.running||v.observer;

@@ -11,10 +11,14 @@
  * Neither is a second implementation of the expert kernels. Those live behind
  * backend.h, and remote traffic is handled by plane.c. See docs/PROTOCOL.md.
  */
+#include "layout.h"
 #include "serve.h"
 #include "control.h"
 #include "net.h"
 #include "native.h"
+#ifdef FR_GSQ_COMPUTE
+#include "hot.h"
+#endif
 #ifdef FR_METAL_COMPUTE
 #include "metal.h"
 #endif
@@ -50,57 +54,231 @@ static struct {
     uint64_t by_burst[FR_MAX_BURST+1],distinct[FR_MAX_BURST+1];
     int64_t started; /* head start, for TIMING READY */
 } S={.listener=-1,.client=-1,.lock=PTHREAD_MUTEX_INITIALIZER,.cond=PTHREAD_COND_INITIALIZER};
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+/* An engine that hangs up in the middle of a call (it ends the pass with its lifeboat,
+ * or it died) must make this write fail, not stop the head with SIGPIPE. */
 static int full(int fd,void *p,size_t n,int writing) {
     for (char *c=p;n;) {
-        ssize_t k=writing?send(fd,c,n,0):recv(fd,c,n,0);
+        ssize_t k=writing?send(fd,c,n,MSG_NOSIGNAL):recv(fd,c,n,0);
         if (k<0 && errno==EINTR) continue;
         if (k<=0) return -1;
         c+=k; n-=(size_t)k;
     }
     return 0;
 }
-/* One expert call, from ds4's socket or (ds4 linked in) its hook: waits while
- * there is no plane (before FRONK, during a re-plan), runs one barrier, counts
- * it. Calls are serialized by S.lock, as ds4's fronk worker issues them. */
-static int serve_call(const fr_req *req,fr_part *part,uint32_t *missing) {
-    pthread_mutex_lock(&S.lock); S.pending=1;
-    while (!S.h && !S.stop) pthread_cond_wait(&S.cond,&S.lock);
-    if (S.stop) { pthread_mutex_unlock(&S.lock); return -1; }
-    int status=fr_head_plane_run(S.h,req,++S.step,S.tau_ns,part);
-    if (!status && S.require_all && S.h->last_missing) {
-        // Expert sums have no side effects. A fresh step excludes late packets
-        // from the original request and replaces the entire partial sum.
-        ++S.retries;
-        status=fr_head_plane_run(S.h,req,++S.step,1000000000,part);
-        if (!status && S.h->last_missing) {
-            fprintf(stderr,"fronk: incomplete expert sum after retry on layer %u (node mask 0x%x)\n",req->layer,S.h->last_missing);
-            status=-1;
-        }
+/* state-dir/route-stats.on present (diagnostic, off by default): how concentrated and how
+ * repetitive expert routing is, per layer. It answers two sizing questions for a
+ * decoded-weight cache on the nodes: how many experts cover most uses, and how
+ * often a call's expert was among the C most recently used ones of its layer (the
+ * hit rate of an LRU cache of C experts). state-dir/route-stats.txt is rewritten
+ * every 9600 calls and at stop: a few kilobytes of counts, never activations or text. */
+static const unsigned route_capacity[]={8,16,32,64,128,256};
+#define ROUTE_CAPS (sizeof(route_capacity)/sizeof(route_capacity[0]))
+static struct {
+    const char *path; uint64_t calls,experts,tokens,hit[ROUTE_CAPS],token_hit[ROUTE_CAPS];
+    uint32_t clock[FR_LAYERS],last[FR_LAYERS][FR_ROUTED_EXPERTS]; uint64_t use[FR_LAYERS][FR_ROUTED_EXPERTS];
+    double top[FR_ACTIVE_ROUTED]; uint64_t gate_tokens; /* share of a token's routed weight in its k largest gates */
+} R;
+static int route_order(const void *a,const void *b) { uint64_t x=*(const uint64_t *)a,y=*(const uint64_t *)b; return x<y?1:x>y?-1:0; }
+static void route_write(void) {
+    FILE *f=R.path && R.calls?fopen(R.path,"w"):NULL; if (!f) return;
+    fprintf(f,"calls %llu distinct_experts_per_call %.2f token_uses_per_call %.2f\n",(unsigned long long)R.calls,
+            (double)R.experts/R.calls,(double)R.tokens/R.calls);
+    for (unsigned c=0;c<ROUTE_CAPS;++c) fprintf(f,"lru_cache_experts_per_layer %u hit_rate_by_expert %.4f hit_rate_by_token_use %.4f\n",
+        route_capacity[c],R.experts?(double)R.hit[c]/R.experts:0,R.tokens?(double)R.token_hit[c]/R.tokens:0);
+    static const double share[]={.5,.8,.9,.99}; double need[4]={0}; unsigned used_layers=0,ever=0;
+    for (unsigned l=0;l<FR_LAYERS;++l) {
+        uint64_t sorted[FR_ROUTED_EXPERTS],total=0,run=0; memcpy(sorted,R.use[l],sizeof(sorted));
+        for (unsigned e=0;e<FR_ROUTED_EXPERTS;++e) { total+=sorted[e]; ever+=sorted[e]!=0; }
+        if (!total) continue;
+        qsort(sorted,FR_ROUTED_EXPERTS,sizeof(sorted[0]),route_order); ++used_layers;
+        for (unsigned e=0,k=0;e<FR_ROUTED_EXPERTS && k<4;++e) { run+=sorted[e]; while (k<4 && (double)run>=share[k]*(double)total) need[k++]+=e+1; }
     }
-    if (status) { pthread_mutex_unlock(&S.lock); return status; }
-    *missing=S.h->last_missing; S.ns[S.count++%SAMPLES]=S.h->last_total_ns; ++S.calls; S.misses+=*missing!=0;
+    if (used_layers) fprintf(f,"experts_per_layer_covering_uses 50%%=%.0f 80%%=%.0f 90%%=%.0f 99%%=%.0f ever_used=%.0f of %u\n",
+        need[0]/used_layers,need[1]/used_layers,need[2]/used_layers,need[3]/used_layers,(double)ever/used_layers,(unsigned)FR_ROUTED_EXPERTS);
+    fprintf(f,"routed_weight_in_largest_gates");
+    for (unsigned k=0;k<FR_ACTIVE_ROUTED;++k) fprintf(f," top%u=%.4f",k+1,R.gate_tokens?R.top[k]/(double)R.gate_tokens:0);
+    fputc('\n',f);
+    fclose(f);
+}
+static void route_stats(const fr_req *req) {
+    const unsigned l=req->layer; uint16_t ids[FR_MAX_BURST*FR_ACTIVE_ROUTED]; uint8_t uses[FR_MAX_BURST*FR_ACTIVE_ROUTED]; unsigned n=0;
+    for (unsigned t=0;t<req->burst;++t) for (unsigned e=0;e<FR_ACTIVE_ROUTED;++e) {
+        unsigned k=0; while (k<n && ids[k]!=req->expert[t][e]) ++k;
+        if (k==n) { ids[n]=req->expert[t][e]; uses[n++]=0; }
+        ++uses[k];
+    }
+    for (unsigned t=0;t<req->burst;++t) {
+        float g[FR_ACTIVE_ROUTED]; double total=0,run=0;
+        for (unsigned e=0;e<FR_ACTIVE_ROUTED;++e) { g[e]=fabsf(req->gate[t][e]); total+=g[e]; }
+        for (unsigned i=1;i<FR_ACTIVE_ROUTED;++i) for (unsigned j=i;j && g[j]>g[j-1];--j) { float v=g[j]; g[j]=g[j-1]; g[j-1]=v; }
+        if (total<=0) continue;
+        for (unsigned e=0;e<FR_ACTIVE_ROUTED;++e) { run+=g[e]; R.top[e]+=run/total; }
+        ++R.gate_tokens;
+    }
+    for (unsigned k=0;k<n;++k) {
+        const uint32_t seen=R.last[l][ids[k]]; unsigned newer=0;
+        R.experts+=1; R.tokens+=uses[k]; R.use[l][ids[k]]+=uses[k];
+        if (!seen) continue;
+        for (unsigned e=0;e<FR_ROUTED_EXPERTS;++e) newer+=R.last[l][e]>seen;
+        for (unsigned c=0;c<ROUTE_CAPS;++c) if (newer<route_capacity[c]) { ++R.hit[c]; R.token_hit[c]+=uses[k]; }
+    }
+    ++R.clock[l]; for (unsigned k=0;k<n;++k) R.last[l][ids[k]]=R.clock[l];
+    if (++R.calls%9600==0) route_write();
+}
+/* The books of one answered call (S.lock held; last_* are this call's). */
+static void account(const fr_req *req) {
+    S.ns[S.count++%SAMPLES]=S.h->last_total_ns; ++S.calls; S.misses+=S.h->last_missing!=0;
     { uint64_t seen[FR_ROUTED_EXPERTS/64]={0}; unsigned n=0;
       for (unsigned t=0;t<req->burst;++t) for (unsigned e=0;e<FR_ACTIVE_ROUTED;++e) {
           unsigned id=req->expert[t][e]; if (!(seen[id/64]>>(id%64)&1)) { seen[id/64]|=1ull<<(id%64); ++n; } }
       ++S.by_burst[req->burst]; S.distinct[req->burst]+=n; }
+    if (R.path) route_stats(req);
+#ifdef FR_GSQ_COMPUTE
+    fr_hot_count(req);
+#endif
+}
+/* A call that came back incomplete, asked again alone (S.lock held, nothing else in
+ * flight). Expert sums have no side effects. A fresh step excludes late packets from
+ * the original request and replaces the entire partial sum. A node that stalls for a
+ * few seconds (scheduler, thermal, link renegotiation) must pause the chat, not kill
+ * the engine: retry with growing deadlines, about 30 s in all, before giving up. */
+static int retry(const fr_req *req,fr_part *part) {
+    static const uint64_t wait_ns[]={1000000000ull,2000000000ull,4000000000ull,8000000000ull,15000000000ull};
+    int status=0;
+    for (unsigned k=0;!status && S.h->last_missing && k<sizeof(wait_ns)/sizeof(wait_ns[0]);++k) {
+        ++S.retries;
+#ifdef FR_GSQ_COMPUTE
+        /* Only the cache node is silent: its experts go back to the slices, which hold
+         * every expert, and this same call is asked again from them. */
+        for (unsigned c=0;c<S.h->caches;++c) if (S.h->cache_link[c]>=0 && S.h->last_missing==1u<<S.h->cache_link[c]) {
+            fprintf(stderr,"fronk: cache node %s stopped answering; its experts are computed by the slice nodes for the rest of this run\n",S.h->links->links[S.h->cache_link[c]].identity.name);
+            fr_hot_policy_disable(c);
+        }
+#endif
+        char parts[320]; fr_head_plane_missing_text(S.h,parts,sizeof(parts));
+        fprintf(stderr,"fronk: layer %u waiting for nodes 0x%x, retry %u (%llu s); %u tokens, reply parts received:%s\n",req->layer,S.h->last_missing,k+1,(unsigned long long)(wait_ns[k]/1000000000ull),req->burst,parts);
+        status=fr_head_plane_run(S.h,req,++S.step,wait_ns[k],part);
+    }
+    if (!status && S.h->last_missing) {
+        fprintf(stderr,"fronk: incomplete expert sum after retries on layer %u (node mask 0x%x)\n",req->layer,S.h->last_missing);
+        status=-1;
+    }
+    return status;
+}
+/* One expert call from ds4 linked in (its hook): waits while there is no plane (before
+ * FRONK, during a re-plan), runs one barrier, counts it. */
+__attribute__((unused)) static int serve_call(const fr_req *req,fr_part *part,uint32_t *missing) {
+    pthread_mutex_lock(&S.lock); S.pending=1;
+    while (!S.h && !S.stop) pthread_cond_wait(&S.cond,&S.lock);
+    if (S.stop) { pthread_mutex_unlock(&S.lock); return -1; }
+    int status=fr_head_plane_run(S.h,req,++S.step,S.tau_ns,part);
+    if (!status && S.require_all && S.h->last_missing) status=retry(req,part);
+    if (!status) { *missing=S.h->last_missing; account(req); }
     pthread_mutex_unlock(&S.lock);
     return status;
 }
-static void handle(int fd) {
-    static fr_req req; static fr_part part;
-    for (;;) {
-        uint32_t head[3]; int32_t status=0; uint32_t missing=0;
-        if (full(fd,head,sizeof(head),0) || head[0]!=FR_SERVE_MAGIC || head[1]>=FR_LAYERS || !head[2] || head[2]>FR_MAX_BURST) return;
-        unsigned b=head[2]; req.layer=head[1]; req.burst=b;
-        for (unsigned t=0;t<b;++t) if (full(fd,req.expert[t],sizeof(req.expert[t]),0)) return;
-        for (unsigned t=0;t<b;++t) if (full(fd,req.gate[t],sizeof(req.gate[t]),0)) return;
-        for (unsigned t=0;t<b;++t) if (full(fd,req.x[t],sizeof(req.x[t]),0)) return;
-        if (S.stop) return;
-        status=serve_call(&req,&part,&missing);
-        if (S.stop) return;
-        if (full(fd,&status,4,1) || full(fd,&missing,4,1)) return;
-        for (unsigned t=0;t<b;++t) if (full(fd,part.y[t],sizeof(part.y[t]),1)) return;
+/* ---- The engine's connections. An engine that runs its pass as two half-batches keeps
+ * one connection for each, with a call in flight on both: the plane holds two calls
+ * (fr_head_plane_begin). One thread serves them all; it holds S.lock while any call is
+ * in flight, as serve_call does for one. ---- */
+#define SERVE_CLIENTS 4
+static int serve_clients[SERVE_CLIENTS]={-1,-1,-1,-1};
+static struct { int client; fr_req req; fr_part part; } call[2];   /* client -1: free (set when the service starts) */
+static int serve_locked;
+static void close_client(int i) {
+    if (serve_clients[i]<0) return;
+    close(serve_clients[i]); serve_clients[i]=-1;
+    for (unsigned s=0;s<2;++s) if (call[s].client==i) call[s].client=-2;   /* its answer has nowhere to go */
+}
+static void accept_client(void) {
+    int fd=accept(S.listener,NULL,NULL); if (fd<0) return;
+    int i=0; while (i<SERVE_CLIENTS && serve_clients[i]>=0) ++i;
+    if (i==SERVE_CLIENTS) { close(fd); return; }
+    /* A reply of a 32-token call is 320 KB: it must fit in the socket while the engine is
+     * still computing the other half-batch, or this thread would wait for it to read. */
+    int one=1,size=1<<20; (void)one;
+#ifdef SO_NOSIGPIPE
+    (void)setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&one,sizeof(one));
+#endif
+    (void)setsockopt(fd,SOL_SOCKET,SO_SNDBUF,&size,sizeof(size));
+    (void)setsockopt(fd,SOL_SOCKET,SO_RCVBUF,&size,sizeof(size));
+    serve_clients[i]=fd; S.client=fd;
+}
+/* A whole request: the engine writes its bytes at once. 0 when the connection ended. */
+static int read_request(int fd,fr_req *req) {
+    uint32_t head[3];
+    if (full(fd,head,sizeof(head),0) || head[0]!=FR_SERVE_MAGIC || head[1]>=FR_LAYERS || !head[2] || head[2]>FR_MAX_BURST) return 0;
+    unsigned b=head[2]; req->layer=head[1]; req->burst=b;
+    for (unsigned t=0;t<b;++t) if (full(fd,req->expert[t],sizeof(req->expert[t]),0)) return 0;
+    for (unsigned t=0;t<b;++t) if (full(fd,req->gate[t],sizeof(req->gate[t]),0)) return 0;
+    for (unsigned t=0;t<b;++t) if (full(fd,req->x[t],sizeof(req->x[t]),0)) return 0;
+    return 1;
+}
+static void reply(unsigned s,int32_t status,uint32_t missing) {
+    const int i=call[s].client; call[s].client=-1;
+    if (i<0 || serve_clients[i]<0) return;
+    const int fd=serve_clients[i];
+    if (full(fd,&status,4,1) || full(fd,&missing,4,1)) { close_client(i); return; }
+    for (unsigned t=0;t<call[s].req.burst;++t) if (full(fd,call[s].part.y[t],sizeof(call[s].part.y[t]),1)) { close_client(i); return; }
+}
+static void complete(unsigned s);
+/* Drive the plane until slot s is complete, then answer it. */
+static void finish(unsigned s) {
+    if (call[s].client==-1 || !S.h->call[s].active) return;   /* free, or ended and being answered */
+    while (!(fr_head_plane_poll(S.h)>>s&1u)) {}
+    complete(s);
+}
+static void complete(unsigned s) {
+    int status=fr_head_plane_end(S.h,s,&call[s].part);
+    if (!status && S.require_all && S.h->last_missing) {
+        finish(s^1u);   /* a retry has the wire to itself */
+        status=retry(&call[s].req,&call[s].part);
     }
+    uint32_t missing=0;
+    if (!status) { missing=S.h->last_missing; account(&call[s].req); }
+    reply(s,status,missing);
+}
+static void *service(void *arg) {
+    (void)arg;
+    call[0].client=call[1].client=-1;
+    while (!S.stop) {
+        const int inflight=call[0].client!=-1 || call[1].client!=-1;
+        struct pollfd p[1+SERVE_CLIENTS]; int who[1+SERVE_CLIENTS]; unsigned n=0;
+        p[n]=(struct pollfd){S.listener,POLLIN,0}; who[n++]=-1;
+        for (int i=0;i<SERVE_CLIENTS;++i)
+            if (serve_clients[i]>=0 && call[0].client!=i && call[1].client!=i) { p[n]=(struct pollfd){serve_clients[i],POLLIN,0}; who[n++]=i; }
+        if (poll(p,n,inflight?0:200)>0) {
+            if (p[0].revents&POLLIN) accept_client();
+            for (unsigned k=1;k<n && !S.stop;++k) {
+                if (!p[k].revents) continue;
+                const int s=call[0].client==-1?0:call[1].client==-1?1:-1;
+                if (s<0) break;   /* two calls in flight: this one is read when a slot is free */
+                const int i=who[k];
+                if (!read_request(serve_clients[i],&call[s].req)) { close_client(i); continue; }
+                if (!serve_locked) {
+                    pthread_mutex_lock(&S.lock); S.pending=1;
+                    while (!S.h && !S.stop) pthread_cond_wait(&S.cond,&S.lock);
+                    serve_locked=1;
+                    if (S.stop) break;
+                }
+                call[s].client=i;
+                int rc=fr_head_plane_begin(S.h,(unsigned)s,&call[s].req,++S.step,S.tau_ns);
+                if (rc==FR_PLANE_BUSY) { finish((unsigned)s^1u); rc=fr_head_plane_begin(S.h,(unsigned)s,&call[s].req,++S.step,S.tau_ns); }
+                if (rc) reply((unsigned)s,-1,0);
+            }
+        }
+        if (serve_locked && !S.stop && (call[0].client!=-1 || call[1].client!=-1)) {
+            const unsigned done=fr_head_plane_poll(S.h);
+            for (unsigned s=0;s<2;++s) if (done>>s&1u && call[s].client!=-1) complete(s);
+        }
+        if (serve_locked && call[0].client==-1 && call[1].client==-1) { serve_locked=0; pthread_mutex_unlock(&S.lock); }
+    }
+    if (serve_locked) { serve_locked=0; pthread_mutex_unlock(&S.lock); }
+    for (int i=0;i<SERVE_CLIENTS;++i) close_client(i);
+    return NULL;
 }
 #ifdef FR_DS4_INPROCESS
 /* ds4 linked into this program (libds4-fronk.a, `ds4 builtin` in the config):
@@ -172,20 +350,27 @@ static void ds4_stop_builtin(void) {
     ds4_server_stop(); pthread_join(D.thread,NULL); D.running=0; fronk_moe_hook=NULL;
 }
 #endif
-static void *service(void *arg) {
-    (void)arg;
-    while (!S.stop) {
-        struct pollfd p={S.listener,POLLIN,0};
-        if (poll(&p,1,200)<=0) continue;
-        int fd=accept(S.listener,NULL,NULL); if (fd<0) continue;
-        S.client=fd; handle(fd); S.client=-1; close(fd);
-    }
-    return NULL;
-}
 /* A head stopped by a signal (web console Stop, Ctrl-C, or SIGPIPE when the
  * console that reads its output is gone) must not orphan ds4. */
 static char pidfile[PATH_MAX+16];
-static void on_signal(int sig) { if (S.ds4>0) { kill(S.ds4,SIGTERM); unlink(pidfile); } signal(sig,SIG_DFL); raise(sig); }
+/* The engine may be in the middle of a pass. Its supervisor closes the request, lets
+ * that pass end and saves the chat before leaving; the pass ends through the cluster
+ * only while this head still answers its expert calls (otherwise the engine needs its
+ * lifeboat, which reads the SSD). So the main thread takes the signal and waits for
+ * the engine to leave, while the service threads go on answering. The console waits
+ * 15 s for a head it stops: this wait stays below that. */
+#define ENGINE_LEAVE_S 12
+static pthread_t main_thread;
+static void on_signal(int sig) {
+    if (!pthread_equal(pthread_self(),main_thread)) { pthread_kill(main_thread,sig); return; }
+    fr_hot_save();
+    if (S.ds4>0) {
+        kill(S.ds4,SIGTERM);
+        for (int i=0;i<ENGINE_LEAVE_S*10;++i) { int status; pid_t gone=waitpid(S.ds4,&status,WNOHANG); if (gone==S.ds4 || gone<0) break; usleep(100000); }
+        unlink(pidfile);
+    }
+    signal(sig,SIG_DFL); raise(sig);
+}
 static int is_ds4(pid_t pid) {
     char path[PATH_MAX+1];
 #ifdef __APPLE__
@@ -221,6 +406,8 @@ int fr_serve_start(const fr_config *cfg) {
                   (width && width[0]>='2' && width[0]<='4' && !width[1]) || (exact && !strcmp(exact,"1"));
     S.stop=0; S.tau_ns=S.require_all?COMPLETE_SUM_TIMEOUT_NS:50000000; S.port=(int)cfg->control_port+10; S.started=net_now_ns();
     if (pthread_create(&S.thread,NULL,service,NULL)) return -1;
+    { static char stats[PATH_MAX+32],on[PATH_MAX+32]; snprintf(stats,sizeof(stats),"%s/route-stats.txt",dir);
+      snprintf(on,sizeof(on),"%s/route-stats.on",dir); R.path=access(on,F_OK)?NULL:stats; }
     snprintf(pidfile,sizeof(pidfile),"%s/ds4.pid",dir); stop_stale_ds4();
     if (!strcmp(cfg->ds4,"builtin")) {
 #ifdef FR_DS4_INPROCESS
@@ -233,6 +420,7 @@ int fr_serve_start(const fr_config *cfg) {
         char log[300],port[16]; snprintf(log,sizeof(log),"%s/ds4.log",cfg->state_dir); snprintf(port,sizeof(port),"%d",S.port);
         if ((S.ds4=fork())<0) return -1;
         if (S.ds4) {
+            main_thread=pthread_self();
             signal(SIGTERM,on_signal); signal(SIGINT,on_signal); signal(SIGHUP,on_signal); signal(SIGPIPE,on_signal);
             FILE *f=fopen(pidfile,"w"); if (f) { fprintf(f,"%d\n",(int)S.ds4); fclose(f); }
         }
@@ -255,12 +443,13 @@ int fr_serve_attach(fr_head_plane *h,const fr_connection *links,const fr_plan *p
 }
 void fr_serve_detach(void) { pthread_mutex_lock(&S.lock); S.h=NULL; pthread_mutex_unlock(&S.lock); }
 void fr_serve_stop(void) {
+    pthread_mutex_lock(&S.lock); route_write(); pthread_mutex_unlock(&S.lock);
     pthread_mutex_lock(&S.lock); S.stop=1; pthread_cond_broadcast(&S.cond); pthread_mutex_unlock(&S.lock);
 #ifdef FR_DS4_INPROCESS
     ds4_stop_builtin();
 #endif
     if (S.ds4>0) { kill(S.ds4,SIGTERM); waitpid(S.ds4,NULL,0); S.ds4=0; unlink(pidfile); }
-    if (S.client>=0) shutdown(S.client,SHUT_RDWR); /* unblock a reader waiting on ds4 */
+    for (int i=0;i<SERVE_CLIENTS;++i) if (serve_clients[i]>=0) shutdown(serve_clients[i],SHUT_RDWR); /* unblock a reader waiting on ds4 */
     if (S.listener>=0) { pthread_join(S.thread,NULL); close(S.listener); unlink(S.path); S.listener=-1; }
     if (S.ds4>0) { kill(S.ds4,SIGTERM); waitpid(S.ds4,NULL,0); S.ds4=0; }
 }
@@ -341,7 +530,8 @@ static void pass_reset(const fr_connection *links,fr_head_plane *h) {
 static void report_nodes(const fr_config *cfg,const fr_connection *links,const fr_plan *plan,fr_head_plane *h,int netcal) {
     double worst=0,mean=0; int bottleneck=-1; unsigned parts=0;
     for (unsigned i=0;i<=links->count;++i) {
-        int head_row=i==links->count; if (!head_row && !(h->active>>i&1)) continue;
+        int head_row=i==links->count,is_cache=0; for (unsigned c=0;c<h->caches;++c) is_cache|=h->cache_link[c]==(int)i;
+        if (!head_row && !(h->active>>i&1) && !is_cache) continue;
         if (head_row && !h->has_local) continue;
         double arrive=h->barriers?h->arrive_ns[i]/1e3/h->barriers:0,compute=0,stage[3]={0};
         if (head_row) compute=h->barriers?h->local_ns/1e3/h->barriers:0;
@@ -505,11 +695,11 @@ int fr_serve_demo(const fr_config *cfg,const fr_connection *links,const fr_plan 
         const unsigned missing=(unsigned)__builtin_popcount(plan->ssd);
         printf("DEMO verdict: the model does NOT fit: %u of %u blocks have no memory (%.1f GB more needed across the machines);"
                " the numbers above time only the %u placed blocks, so they are not the speed you would get\n",
-               missing,FR_BLOCKS,missing*(double)FR_NATIVE_BLOCK_BYTES/1e9,FR_BLOCKS-missing);
+               missing,FR_BLOCKS,missing*(double)(double)fr_unit_bytes()/1e9,FR_BLOCKS-missing);
         if (plan->cache_read_bps>0) {
             // Cold reads for distinct experts in one decode pass. Resident
             // compute and link time are already included in the measured p50.
-            double disk_ms=1000.0*FR_LAYERS*missing*(vulkan?10.0:15.8)*FR_NATIVE_SLICE_BYTES/plan->cache_read_bps;
+            double disk_ms=1000.0*FR_LAYERS*missing*(vulkan?10.0:15.8)*(double)fr_slice_bytes_mean()/plan->cache_read_bps;
             printf("DEMO full model with cold spill: ~%.2f tok/s if disk reads add %.0f ms to the %.0f ms resident pass "
                    "(cache drive %.2f GB/s). Cache hits, overlap and extra CPU work change the real rate.\n",
                    (vulkan?1.0:1.56)*1000.0/(p50+disk_ms),disk_ms,p50,plan->cache_read_bps/1e9);
@@ -552,6 +742,12 @@ static int test_pass(const fr_config *cfg,const fr_connection *links,const fr_pl
         printf("REPORT generation time wall_s=%.3f experts_s=%.3f outside_experts_s=%.3f\n",
                wall,experts,fmax(0,wall-experts));
     }
+#ifdef FR_GSQ_COMPUTE
+    for (unsigned c=0;c<h->caches;++c) { unsigned experts; double served; fr_hot_report(c,&experts,&served);
+        const uint64_t calls=atomic_load(&h->cache_calls[c]),late=atomic_load(&h->cache_last[c]);
+        printf("REPORT cache %u node=%s experts=%u served=%.0f%% of expert uses, last to answer in %.0f%% of calls (balanced near 45%%)\n",
+               c+1,h->cache_link[c]<0?"head":links->links[h->cache_link[c]].identity.name,experts,100*served,calls?100.0*late/calls:0); }
+#endif
     if (S.require_all) printf("REPORT complete sums: %llu, retried requests: %llu\n",(unsigned long long)calls,(unsigned long long)retries);
     report_nodes(cfg,links,plan,h,1);
     if (cfg->ds4[0] && (status!=200 || !tokens || !calls)) {
@@ -578,6 +774,21 @@ int fr_serve_session(const fr_config *cfg,const fr_connection *links,const fr_pl
         else { do c=getchar(); while (c==' ' || c=='\n'); for (int d=c;d!='\n' && d!=EOF;d=getchar()) {} }
         if (c=='m') return 1;
         if (c=='q' || c==EOF) return 0;
-        if (c=='r' && test_pass(cfg,links,plan,h,++number)) return -1;
+        if (c=='r') {
+            /* Diagnostic A/B only, at an explicit retest boundary. This keeps
+             * weights, sessions and placement fixed; never poll files per layer.
+             * Capability was checked on every active node before attachment. */
+            char path[512];snprintf(path,sizeof(path),"%s/wire-q8k-ab",cfg->state_dir);
+            FILE *ab=fopen(path,"r");
+            if (ab) {
+                fclose(ab);
+                if (!h->q8_capable) { fputs("fronk: Q8 A/B requires startup capability checks\n",stderr);return -1; }
+                snprintf(path,sizeof(path),"%s/wire-q8k",cfg->state_dir);
+                FILE *mode=fopen(path,"r");int enabled=mode!=NULL;if(mode)fclose(mode);
+                pthread_mutex_lock(&S.lock);h->q8_k=enabled;pthread_mutex_unlock(&S.lock);
+                printf("TRANSPORT A/B %s (same loaded sessions and placement)\n",enabled?"q8k-v1":"fp16");
+            }
+            if (test_pass(cfg,links,plan,h,++number)) return -1;
+        }
     }
 }

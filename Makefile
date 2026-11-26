@@ -27,7 +27,7 @@ BUILD_FLAGS := -D_POSIX_C_SOURCE=200809L $(PLATFORM_FLAGS) -DFRONK_DEBUG=1 \
                -DFR_BUILD_OS='"$(OS)"' -DFR_BUILD_ARCH='"$(ARCH)"'
 SANITIZERS := -O1 -fno-omit-frame-pointer -fsanitize=address,undefined \
               -fno-sanitize-recover=all
-TESTS := runtime mtp-worker prep head plane selection planner fanout wire interfaces model test resp ae net udp config sha256 auth auth-entropy stats control probe hw hw-failure identity q4 native backend vectors bench ssd
+TESTS := runtime mtp-worker prep head plane selection planner fanout wire interfaces model test resp ae net udp config sha256 auth auth-entropy stats control probe hw hw-failure identity q4 native backend vectors bench ssd gsq
 HW := src/hw.c
 ifeq ($(OS),macos)
   TESTS += hw-vm
@@ -53,6 +53,36 @@ ifeq ($(ARCH),x86_64)
   BACKEND += backends/avx2.c
   TESTS += avx2
 endif
+# GSQ units (layout.h): the gsq backend and the unit layout are always built. The
+# GSQ kernels and the vendored ggml (third_party/ggml, MIT) compile into one
+# library with their own flags: ggml is not written for -std=c11 -Werror, and its
+# SIMD paths need the target ISA at compile time (the backend probes for it).
+ifeq ($(ARCH),x86_64)
+  GSQ_ARCH := x86
+  GSQ_ISA := -mavx2 -mfma -mf16c -mbmi2
+else ifeq ($(SYSTEM),Darwin)
+  GSQ_ARCH := arm
+  GSQ_ISA := -mcpu=apple-m1
+else
+  GSQ_ARCH := arm
+  GSQ_ISA := -march=armv8.2-a+dotprod+fp16
+endif
+GSQ_LIB := build/gsq/$(ARCH)/libfronk-gsq.a
+GGML := third_party/ggml
+GSQ_SOURCES := src/layout.c src/gsq.c src/gsq_down.c src/gsq_multi.c $(GGML)/fronk_shim.c $(GGML)/src/ggml-quants.c \
+               $(GGML)/src/ggml-cpu/quants.c $(GGML)/src/ggml-cpu/arch/$(GSQ_ARCH)/quants.c
+GSQ_INPUTS := $(GSQ_SOURCES) src/layout.h src/native.h src/gsq.h src/gsq_down.h src/gsq_multi.h src/gsq_signs.inc $(wildcard $(GGML)/include/*.h) \
+              $(wildcard $(GGML)/src/*.h) $(wildcard $(GGML)/src/ggml-cpu/*.h)
+COMPUTE_FLAGS += -DFR_GSQ_COMPUTE=1
+BACKEND += backends/gsq.c src/hot.c
+LDLIBS += $(GSQ_LIB)
+$(GSQ_LIB): $(GSQ_INPUTS) Makefile
+	mkdir -p $(dir $@)obj
+	for f in $(GSQ_SOURCES); do \
+	  $(CC) -O3 -g -std=gnu11 -w $(GSQ_ISA) $(PLATFORM_FLAGS) -I$(GGML)/include -I$(GGML)/src -I$(GGML)/src/ggml-cpu -Isrc \
+	    -c $$f -o $(dir $@)obj/$$(echo $$f | tr / _ | sed 's/\.c$$/.o/') || exit 1; done
+	ar rcs $@ $(dir $@)obj/*.o
+
 # Your own backend: backends/user.c defines fr_user (BACKENDS.md). Build another
 # file in its place with make USER_BACKEND=backends/user-template.c.
 USER_BACKEND ?= $(wildcard backends/user.c)
@@ -75,7 +105,7 @@ PLANE := src/plane.c src/fanout.c src/units.c src/prep.c
 CORE := src/ae.c src/resp.c src/net.c src/config.c src/runtime.c src/node.c src/head.c src/serve.c src/setup.c src/hybrid.c $(PLANE) $(CONNECTION) $(DISCOVERY) $(CRYPTO) $(BACKEND)
 LDLIBS += -lm -pthread
 CLI := tools/fronk-cli.c src/control.c src/net.c src/resp.c src/config.c $(CRYPTO)
-HEADERS := $(wildcard src/*.h) $(wildcard backends/*.inc) $(FR_MODULE_INPUTS) build/backend-modules/registry.h build/backend-modules/modules.mk
+HEADERS := $(wildcard src/*.h) $(wildcard backends/*.inc) $(FR_MODULE_INPUTS) build/backend-modules/registry.h build/backend-modules/modules.mk $(GSQ_LIB)
 
 .PHONY: all dist gpu-head test-installer fronk-extract test test-core $(addprefix test-,$(TESTS)) test-main test-node test-cli test-local-cluster test-interop test-connection test-discovery test-bench-control test-topology clean
 # fronk-extract (PDF and photo text for a head's chat) needs macOS and swiftc.
@@ -128,6 +158,9 @@ build/test/test_q4: tests/test_q4.c src/q4.c $(HEADERS) tests/test.h Makefile | 
 
 build/test/test_bench: tests/test_bench.c src/bench.c $(HEADERS) tests/test.h Makefile | build/test
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(REQUIRED_FLAGS) $(BUILD_FLAGS) $(SANITIZERS) tests/test_bench.c src/bench.c $(LDFLAGS) $(LDLIBS) -o $@
+
+build/test/test_gsq: tests/test_gsq.c $(BACKEND_DEPS) $(HEADERS) tests/test.h Makefile | build/test
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(REQUIRED_FLAGS) $(BUILD_FLAGS) $(COMPUTE_FLAGS) tests/test_gsq.c $(BACKEND_DEPS) $(LDFLAGS) $(LDLIBS) $(HW_LIBS) -o $@
 
 build/test/test_backend: tests/test_backend.c $(BACKEND_DEPS) $(HEADERS) tests/test.h Makefile | build/test
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(REQUIRED_FLAGS) $(BUILD_FLAGS) $(COMPUTE_FLAGS) $(SANITIZERS) tests/test_backend.c $(BACKEND_DEPS) $(LDFLAGS) $(LDLIBS) $(HW_LIBS) -o $@
@@ -198,7 +231,7 @@ endif
 # must not charge every machine for another sweep. In particular plane/control
 # structs and planner policy do not alter a backend measurement. Cache schema
 # versions live in the measurement code, which remains fingerprinted here.
-BENCH_HEADERS := src/backend.h src/bench.h src/hw.h src/model.h src/native.h src/q4.h src/metal.h src/neon.h src/avx2.h src/ssd.h src/sha256.h src/vectors.h
+BENCH_HEADERS := src/backend.h src/bench.h src/hw.h src/model.h src/native.h src/q4.h src/metal.h src/neon.h src/avx2.h src/ssd.h src/sha256.h src/vectors.h src/layout.h $(GSQ_INPUTS)
 BENCH_INPUTS := $(sort $(BACKEND_DEPS) src/hybrid.c $(BENCH_HEADERS) $(wildcard backends/*.inc) $(wildcard tests/vectors/*.txt) $(FR_MODULE_INPUTS) build/backend-modules/registry.h build/backend-modules/modules.mk)
 BENCH_DIGEST = $(shell { $(CC) --version; printf '%s\n' "$(CPPFLAGS) $(CFLAGS) $(REQUIRED_FLAGS) $(COMPUTE_FLAGS) $(LDFLAGS) $(PLATFORM_FLAGS) $(ARCH)"; cat $(BENCH_INPUTS); } | $(if $(filter macos,$(OS)),shasum -a 256,sha256sum) | cut -d' ' -f1)
 FRONK_TARGET ?= fronk
@@ -339,6 +372,24 @@ engine:
 	@if [ -f "$(DS4)/.fronk-source" ] || [ ! -f "$(DS4)/Makefile" ]; then bash tools/engine/prepare.sh "$(DS4)"; \
 	else echo "Using externally supplied engine source: $(DS4)"; fi
 
+# The GSQ-RCO head engine (config `ds4 tools/engine/gsq/run.sh`): llama.cpp with
+# Fronk's routed-expert hook, static and without OpenSSL, for macOS 15 and later so
+# one build runs on every Apple Silicon head; plus the GPU keepalive. GSQ_LLAMA is
+# a prepared source tree (tools/engine/gsq/prepare.sh makes one from the pinned
+# public commit and the patch).
+GSQ_LLAMA ?= $(CURDIR)/build/gsq-source
+.PHONY: gsq-engine
+gsq-engine:
+	@if [ ! -f "$(GSQ_LLAMA)/CMakeLists.txt" ]; then bash tools/engine/gsq/prepare.sh "$(GSQ_LLAMA)"; fi
+	cmake -S "$(GSQ_LLAMA)" -B "$(GSQ_LLAMA)/build-fronk" -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
+	  -DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8.4-a+fp16+dotprod -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON \
+	  -DBUILD_SHARED_LIBS=OFF -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF
+	cmake --build "$(GSQ_LLAMA)/build-fronk" --target llama-server -j
+	mkdir -p build/gsq-engine
+	cp "$(GSQ_LLAMA)/build-fronk/bin/llama-server" build/gsq-engine/fronk-llama-server
+	clang -O2 -fobjc-arc -mmacosx-version-min=15.0 -framework Metal -framework Foundation \
+	  -o build/gsq-engine/gpu-keepalive tools/gpu-keepalive.m
+
 # A public checkout can build the same ordinary Metal head as the installer.
 head: engine
 	bash tools/mtp/stage-ds4.sh "$(DS4)" build/head-engine
@@ -449,3 +500,8 @@ test-mtp-dense: mtp-native-head
 # Read-only full-model release audit; deliberately separate from fast tests.
 build/fronk-model-check: tools/fronk-model-check.c src/prep.c src/sha256.c $(HEADERS) Makefile | build/test
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(REQUIRED_FLAGS) $(BUILD_FLAGS) tools/fronk-model-check.c src/prep.c src/sha256.c $(LDFLAGS) $(LDLIBS) -o $@
+
+build/test/test_q8_wire: tests/test_q8_wire.c $(CORE) $(HEADERS) tests/test.h Makefile | build/test
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(REQUIRED_FLAGS) $(BUILD_FLAGS) $(COMPUTE_FLAGS) $(SANITIZERS) tests/test_q8_wire.c $(CORE) $(LDFLAGS) $(LDLIBS) $(HW_LIBS) -o $@
+test-q8-wire: build/test/test_q8_wire
+	./build/test/test_q8_wire

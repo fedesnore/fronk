@@ -19,6 +19,11 @@ ssize_t net_udp_recv(int fd, void *data, size_t cap, struct sockaddr_in *peer);
 ssize_t net_udp_send(int fd, const void *data, size_t len, const struct sockaddr_in *peer);
 int net_tcp_listen(const char *ip, unsigned port); /* Zero asks for an ephemeral port. */
 int net_tcp_accept(int listener);
+/* on: the system tests this connected peer now, one probe a second; a peer that misses
+ * four, or whose machine no longer knows the connection, makes the next read fail.
+ * off: no more probes. A peer that is not under test is sent nothing, so a machine
+ * asleep on purpose is not woken by the other end of its connections. */
+void net_tcp_probe(int fd, int on);
 int net_tcp_connect(const char *ip, unsigned port, int timeout_ms);
 int net_tcp_connect_from(const char *ip,unsigned port,int timeout_ms,const char *local,unsigned interface_index);
 int net_bind_interface(int fd,unsigned interface_index);

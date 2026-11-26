@@ -23,7 +23,7 @@
 #define FR_INTERMEDIATE 640
 #define FR_BLOCK_NEURONS 32
 #define FR_BLOCKS (FR_INTERMEDIATE / FR_BLOCK_NEURONS)
-#define FR_MAX_BURST 8
+#define FR_MAX_BURST 32
 #define FR_BENCH_BURST_MAX 4
 
 /* Canonical ggml Q4_0: one fp16 scale and sixteen packed nibble bytes. */

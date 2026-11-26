@@ -15,6 +15,10 @@
  * loaded between compatible sessions; synthetic demo units must not survive as
  * real model weights. See docs/PROTOCOL.md and docs/llm/RUNTIME.md.
  */
+#include "hot.h"
+#include "layout.h"
+#include <sys/stat.h>
+#include <sys/mman.h>
 #include "wire.h"
 #include "node.h"
 #include "ae.h"
@@ -106,6 +110,7 @@ typedef struct {
     fr_units units; unsigned units_burst; /* burst the kept units were started with */
     int units_synthetic; /* the kept units are SESSION SYNTHETIC ones: reload for a real session */
     uint64_t session_owner;
+    int64_t probe_until;   /* the head that holds this node is under test until then (LINK), else 0 */
     struct timespec started;
     client *clients;
 } node;
@@ -114,10 +119,56 @@ typedef struct {
  * are dropped when a session needs other blocks or a backend, or before a
  * benchmark that loads its own. */
 /* ---- Session lifetime: detach the receiver before changing loaded units. ---- */
+/* SESSION CACHE: this node holds no unit and keeps whole hot experts instead
+ * (hot.h), copied from its own model file (`model` in the configuration). */
+static fr_gguf cache_model; static int cache_on;
+#ifdef FR_HOTGPU
+/* state-dir/cache-gpu, one line "UNITS_DIR KERNELS_FILE": the cache is the video
+ * memory of this Mac's GPU (hotgpu.h), filled from the unit files of that directory
+ * (all 20: a whole expert is its slice of every unit). */
+#include "hotgpu.h"
+static int cache_gpu; static int (*q8_before)(const fr_req *,const void *,fr_part *);
+static void log_line(const char *level, const char *format, ...);
+#endif
+static int cache_admit(unsigned layer,unsigned expert) {
+#ifdef FR_HOTGPU
+    if (cache_gpu) return fr_hotgpu_admit(layer,expert);
+#endif
+    return fr_hot_admit(layer,expert);
+}
+static int cache_evict(unsigned layer,unsigned expert) {
+#ifdef FR_HOTGPU
+    if (cache_gpu) return fr_hotgpu_evict(layer,expert);
+#endif
+    return fr_hot_evict(layer,expert);
+}
+static void cache_close(void) {
+#ifdef FR_HOTGPU
+    if (cache_gpu) { fr_plane_q8_run=q8_before; fr_plane_patient=0; fr_hotgpu_close(); cache_gpu=0; cache_on=0; return; }
+#endif
+    if (cache_on) { fr_hot_close(); fr_gguf_close(&cache_model); cache_on=0; }
+}
+static int cache_open(node *s,uint64_t megabytes) {
+    cache_close();
+#ifdef FR_HOTGPU
+    { char path[1100],dir[1024],kernels[1024]; snprintf(path,sizeof(path),"%s/cache-gpu",s->config->state_dir);
+      FILE *f=fopen(path,"r");
+      if (f) {
+          const int n=fscanf(f,"%1023s %1023s",dir,kernels); fclose(f);
+          if (n!=2 || fr_hotgpu_open(dir,(1u<<FR_BLOCKS)-1,kernels,megabytes*1000000ull)) return -1;
+          q8_before=fr_plane_q8_run; fr_plane_q8_run=fr_hotgpu_run; fr_plane_patient=1; cache_gpu=1; cache_on=1;
+          log_line("notice","cache in video memory, units from %s",dir);
+          return 0;
+      } }
+#endif
+    if (!s->config->model[0] || fr_gguf_open(s->config->model,&cache_model)) return -1;
+    if (cache_model.layout!=FR_LAYOUT_GSQ || fr_hot_open(&cache_model,megabytes*1000000ull)) { fr_gguf_close(&cache_model); return -1; }
+    cache_on=1; return 0;
+}
 static int session_stop(node *s) {
     int rc=0;
     if (s->receiver) {
-        rc=fr_receiver_close(s->receiver); free(s->receiver); s->receiver=NULL; s->session_owner=0;
+        rc=fr_receiver_close(s->receiver); free(s->receiver); s->receiver=NULL; s->session_owner=0; cache_close();
         if (ae_set(s->loop,s->data,0,AE_READ,UINT64_MAX-2) ||
             ae_set(s->loop,s->multicast,0,AE_READ,UINT64_MAX-1)) rc=-1;
     }
@@ -247,7 +298,7 @@ static void bench_command(node *s,client *c,resp_value *v,resp_buf *out) {
         s->bench.hw.margin=s->config->mem_margin; s->bench.hw.head_reserve=s->config->head_reserve;
         if (node_finalize(s,&s->bench.hw)) { resp_error(out,"ERR hardware probe unavailable"); return; } s->bench.cache=s->config->state_dir; s->bench.burst=burst;
         atomic_store(&s->bench.done,0); atomic_store(&s->bench.cancel,0); s->bench.owner=c->tag; s->selection.assigned=0;
-        if (pthread_create(&s->bench.thread,NULL,bench_worker,&s->bench)) { ++s->bench_errors; resp_error(out,"ERR cannot start benchmark worker"); return; }
+        if (fr_thread_create(&s->bench.thread,bench_worker,&s->bench)) { ++s->bench_errors; resp_error(out,"ERR cannot start benchmark worker"); return; }
         s->bench.active=1; c->bench_pending=1; return;
     }
     (void)fr_units_close(&s->units); /* the benchmarks below load their own blocks */
@@ -266,7 +317,7 @@ static void bench_command(node *s,client *c,resp_value *v,resp_buf *out) {
     if (!s->bench.backend) { resp_error(out,"ERR backend not compiled"); return; }
     atomic_store(&s->bench.done,0); atomic_store(&s->bench.cancel,0);
     s->bench.blocks=blocks; s->bench.burst=v[0].len==1?0:burst; s->bench.candidate=candidate; s->bench.owner=c->tag; s->bench_valid=0; s->selection.assigned=0;
-    int error=pthread_create(&s->bench.thread,NULL,bench_worker,&s->bench);
+    int error=fr_thread_create(&s->bench.thread,bench_worker,&s->bench);
     if (error) { ++s->bench_errors; resp_error(out,"ERR cannot start benchmark worker"); return; }
     s->bench.active=1; c->bench_pending=1;
 }
@@ -389,7 +440,7 @@ static void info(node *s, const resp_value *section, resp_buf *out) {
         case 2: rc=add_text(text,sizeof(text),&used,
                     "weights_bytes:%" PRIu64 "\r\ncontrol_buffer_bytes:%zu\r\ncontrol_input_bytes:%zu\r\ncontrol_output_bytes:%zu\r\n"
                     "mem_total_bytes:%" PRIu64 "\r\nmem_available_bytes:%" PRIu64 "\r\nmem_margin_bytes:%" PRIu64 "\r\nmem_cap_bytes:%" PRIu64 "\r\n",
-                    (uint64_t)__builtin_popcount(s->units.mask)*FR_NATIVE_BLOCK_BYTES,sizeof(client)*NODE_CLIENTS,input_bytes,output_bytes,s->hw_valid?s->hw.total:0,s->hw_valid?s->hw.available:0,
+                    (uint64_t)__builtin_popcount(s->units.mask)*fr_unit_bytes(),sizeof(client)*NODE_CLIENTS,input_bytes,output_bytes,s->hw_valid?s->hw.total:0,s->hw_valid?s->hw.available:0,
                     s->hw_valid?s->hw.margin:0,s->hw_valid?s->hw.cap:0); break;
         case 3: rc=add_text(text,sizeof(text),&used,"session:%s\r\nsession_id:%u\r\nunit_mask:%u\r\n",
                     s->receiver?"active":"inactive",s->receiver?s->receiver->session:0,s->units.mask); break;
@@ -469,7 +520,28 @@ static int histogram(const resp_value *v, unsigned count, char out[192]) {
     if (bins!=32 || sum!=count) return -1;
     memcpy(out,v->data,v->len); out[v->len]='\0'; return 0;
 }
-/* RECV block sha256: the next FR_NATIVE_BLOCK_BYTES on this connection are
+/* Units of each layout live in their own directory: native ones in state-dir (as
+ * before), GSQ ones in state-dir/gsq, so switching LAYOUT never overwrites them. */
+static const char *unit_dir(const node *s) { return fr_layout_dir(s->config->state_dir); }
+/* LAYOUT [native|gsq]: the unit format the head works with (layout.h). Changing
+ * it drops kept units and the backend choice: candidates differ per layout. */
+static void layout_command(node *s,resp_value *v,resp_buf *out) {
+    if (v[0].len==1) { const char *n=fr_layout_name(fr_layout()); resp_bulk(out,n,strlen(n)); return; }
+    char name[16]={0}; unsigned layout;
+    if (v[0].len!=2 || !v[2].len || v[2].len>=sizeof(name)) { resp_error(out,"ERR LAYOUT [native|gsq]"); return; }
+    memcpy(name,v[2].data,v[2].len);
+    if (fr_layout_parse(name,&layout)) { resp_error(out,"ERR unknown unit layout (native, gsq)"); return; }
+    if (layout==fr_layout()) { resp_simple(out,"OK"); return; }
+    if (s->receiver || s->bench.active) { resp_error(out,"BUSY session or benchmark running"); return; }
+    for (int i=0;i<NODE_CLIENTS;++i) if (s->clients[i].fd>=0 && s->clients[i].rx_fd>=0) { resp_error(out,"BUSY unit transfer running"); return; }
+    if (layout==FR_LAYOUT_GSQ && !fr_backend_find("gsq")) { resp_error(out,"ERR this node was built without the gsq backend"); return; }
+    (void)fr_units_close(&s->units);
+    fr_layout_set(layout);
+    memset(&s->selection,0,sizeof(s->selection)); s->bench_valid=0;
+    log_line("notice","unit layout %s",fr_layout_name(layout));
+    resp_simple(out,"OK");
+}
+/* RECV block sha256: the next unit (fr_unit_bytes of this LAYOUT) on this connection are
  * the unit, hashed while written to a temporary file and renamed on a match. */
 /* ---- Weight transfer: stream into temporary storage; publish after SHA-256. ---- */
 static void recv_command(node *s,client *c,resp_value *v,resp_buf *out) {
@@ -478,17 +550,37 @@ static void recv_command(node *s,client *c,resp_value *v,resp_buf *out) {
     for (size_t i=0;i<64;++i) if (!isxdigit((unsigned char)v[3].data[i]) || isupper((unsigned char)v[3].data[i])) { resp_error(out,"ERR RECV block sha256"); return; }
     if (s->receiver) { resp_error(out,"BUSY unit in use by a session"); return; }
     if (s->units.mask&(1u<<block)) (void)fr_units_close(&s->units); /* kept from the last session; about to be replaced */
+    {   /* A unit file already here (placed by hand, or left by an interrupted run)
+         * is hashed, never trusted: on a match it is stamped and nothing is sent. */
+        char have[300]; struct stat st; snprintf(have,sizeof(have),"%s/unit-%02u.bin",unit_dir(s),(unsigned)block);
+        if (!stat(have,&st) && (uint64_t)st.st_size==fr_unit_bytes()) {
+            int fd=open(have,O_RDONLY); unsigned char d[32]; char hex[65]; int match=0;
+            void *m=fd>=0?mmap(NULL,(size_t)st.st_size,PROT_READ,MAP_SHARED,fd,0):MAP_FAILED;
+            if (m!=MAP_FAILED) {
+                if (!sha256(m,(size_t)st.st_size,d)) {
+                    for (unsigned i=0;i<32;++i) snprintf(hex+2*i,3,"%02x",d[i]);
+                    match=!memcmp(hex,v[3].data,64);
+                }
+                munmap(m,(size_t)st.st_size);
+            }
+            if (fd>=0) close(fd);
+            if (match && !fr_units_stamp(unit_dir(s),(unsigned)block,hex)) {
+                log_line("notice","unit %02u already here, SHA-256 verified",(unsigned)block);
+                resp_simple(out,"EXISTS"); return;
+            }
+        }
+    }
     if (statvfs(s->config->state_dir,&fs)) { resp_error(out,"ERR cannot inspect unit-cache disk; check state-dir on this node"); return; }
-    uint64_t available=(uint64_t)fs.f_bavail*fs.f_frsize,needed=FR_NATIVE_BLOCK_BYTES+((uint64_t)1<<30);
+    uint64_t available=(uint64_t)fs.f_bavail*fs.f_frsize,needed=fr_unit_bytes()+((uint64_t)1<<30);
     if (available<needed) {
         char error[200];
         snprintf(error,sizeof(error),"ERR unit %02u needs %llu bytes free including reserve; %llu available. Free disk space on this node or use a larger state-dir",
                  (unsigned)block,(unsigned long long)needed,(unsigned long long)available);
         resp_error(out,error); return;
     }
-    snprintf(path,sizeof(path),"%s/unit-%02u.tmp",s->config->state_dir,(unsigned)block);
+    snprintf(path,sizeof(path),"%s/unit-%02u.tmp",unit_dir(s),(unsigned)block);
     if ((c->rx_fd=open(path,O_WRONLY|O_CREAT|O_TRUNC,0600))<0) { resp_error(out,"ERR cannot create unit"); return; }
-    c->rx_block=(unsigned)block; c->rx_left=FR_NATIVE_BLOCK_BYTES; memcpy(c->rx_hex,v[3].data,64); c->rx_hex[64]=0;
+    c->rx_block=(unsigned)block; c->rx_left=fr_unit_bytes(); memcpy(c->rx_hex,v[3].data,64); c->rx_hex[64]=0;
     sha256_init(&c->rx_sha); resp_simple(out,"OK");
 }
 static void recv_data(node *s,client *c,resp_buf *out) {
@@ -502,9 +594,9 @@ static void recv_data(node *s,client *c,resp_buf *out) {
     for (unsigned i=0;i<32;++i) snprintf(hex+2*i,3,"%02x",d[i]);
     if (close(c->rx_fd)) bad=1;
     c->rx_fd=-1;
-    snprintf(tmp,sizeof(tmp),"%s/unit-%02u.tmp",s->config->state_dir,c->rx_block);
-    snprintf(path,sizeof(path),"%s/unit-%02u.bin",s->config->state_dir,c->rx_block);
-    if (bad || memcmp(hex,c->rx_hex,64) || rename(tmp,path) || fr_units_stamp(s->config->state_dir,c->rx_block,hex)) {
+    snprintf(tmp,sizeof(tmp),"%s/unit-%02u.tmp",unit_dir(s),c->rx_block);
+    snprintf(path,sizeof(path),"%s/unit-%02u.bin",unit_dir(s),c->rx_block);
+    if (bad || memcmp(hex,c->rx_hex,64) || rename(tmp,path) || fr_units_stamp(unit_dir(s),c->rx_block,hex)) {
         unlink(tmp); resp_error(out,"ERR unit SHA-256 mismatch or write failure");
     } else resp_simple(out,"OK");
 }
@@ -516,12 +608,13 @@ static void session_command(node *s,client *c,resp_value *v,resp_buf *out) {
         return;
     }
     uint64_t id,blocks,burst,deadline=0; int fixture=0;
+    const int cache=v[0].len==6 && same(&v[2],"cache");   /* blocks carries its megabytes */
 #ifdef FRONK_DEBUG
     fixture=v[0].len==6 && same(&v[2],"test");
     /* SESSION SYNTHETIC: as START, on synthetic units of the same mask (fronk demo). */
     int synthetic=v[0].len==6 && same(&v[2],"synthetic");
 #endif
-    if (v[0].len!=6 || (!fixture && !synthetic && !same(&v[2],"start")) ||
+    if (v[0].len!=6 || (!fixture && !synthetic && !cache && !same(&v[2],"start")) ||
         decimal(&v[3],UINT32_MAX,&id) || !id || id!=c->link_session ||
         decimal(&v[4],(1u<<FR_BLOCKS)-1,&blocks) || decimal(&v[5],8,&burst) || !burst ||
         (fixture?blocks>=FR_BLOCKS:!blocks || decimal(&v[6],UINT32_MAX,&deadline) || !deadline)) {
@@ -530,7 +623,8 @@ static void session_command(node *s,client *c,resp_value *v,resp_buf *out) {
     if (s->receiver || s->bench.active) { resp_error(out,"BUSY session or benchmark running"); return; }
     const fr_backend *backend=NULL;
     uint32_t paged=0; uint64_t cache_bytes=FR_SSD_DEFAULT_CACHE;
-    if (fixture) {
+    if (cache) backend=fr_layout()==FR_LAYOUT_GSQ?fr_backend_find("gsq"):NULL;
+    else if (fixture) {
         char name[16]={0};
         if (!v[6].len || v[6].len>=sizeof(name)) { resp_error(out,"ERR test backend"); return; }
         memcpy(name,v[6].data,v[6].len); backend=fr_backend_find(name);
@@ -570,19 +664,20 @@ static void session_command(node *s,client *c,resp_value *v,resp_buf *out) {
     local.index=c->udp_index?c->udp_index:s->probe_index?s->probe_index:resolved[0].index; /* one head at a time */
     local.address=endpoint.sin_addr;
     int loaded=0;
-    if (fixture || synthetic || s->units_synthetic || s->units.mask!=(uint32_t)blocks || s->units.backend!=backend || s->units.paged!=paged || (paged && s->units.cache_bytes!=cache_bytes)) {
+    if (cache) { (void)fr_units_close(&s->units); loaded=cache_open(s,blocks); }
+    else if (fixture || synthetic || s->units_synthetic || s->units.mask!=(uint32_t)blocks || s->units.backend!=backend || s->units.paged!=paged || (paged && s->units.cache_bytes!=cache_bytes)) {
         (void)fr_units_close(&s->units);
         loaded=fixture?fr_units_fixture(&s->units,backend,(unsigned)blocks):
                synthetic?fr_units_synthetic_cache(&s->units,backend,(uint32_t)blocks,paged,cache_bytes,s->config->state_dir):
-               fr_units_open_cache(&s->units,backend,s->config->state_dir,(uint32_t)blocks,paged,cache_bytes);
+               fr_units_open_cache(&s->units,backend,unit_dir(s),(uint32_t)blocks,paged,cache_bytes);
         s->units_synthetic=synthetic; /* never kept for a real session */
     }
-    if (loaded) { resp_error(out,"ERR unit load or SHA-256 validation failed"); return; }
+    if (loaded) { resp_error(out,cache?"ERR cache: set `model` to the GSQ file in this node's configuration":"ERR unit load or SHA-256 validation failed"); return; }
     fr_receiver *r=calloc(1,sizeof(*r));
-    if (!r) { fr_units_close(&s->units); resp_error(out,"ERR session allocation failed"); return; }
+    if (!r) { fr_units_close(&s->units); cache_close(); resp_error(out,"ERR session allocation failed"); return; }
     if (ae_set(s->loop,s->data,AE_READ,0,UINT64_MAX-2) || ae_set(s->loop,s->multicast,AE_READ,0,UINT64_MAX-1) ||
         fr_receiver_open(r,s->data,s->multicast,(uint32_t)id,c->link_node,(unsigned)burst,&c->udp_peer,&local,backend)) {
-        free(r); fr_units_close(&s->units);
+        free(r); fr_units_close(&s->units); cache_close();
         (void)ae_set(s->loop,s->data,0,AE_READ,UINT64_MAX-2); (void)ae_set(s->loop,s->multicast,0,AE_READ,UINT64_MAX-1);
         resp_error(out,"ERR session worker failed"); return;
     }
@@ -594,7 +689,21 @@ static void link_command(node *s, client *c, resp_value *v, resp_buf *out) {
         if (s->session_owner==c->tag) (void)session_stop(s);
         c->link_session=0; resp_simple(out,"OK"); return;
     }
-    if (s->receiver) { resp_error(out,"BUSY session pins linked path"); return; }
+    if (s->receiver) {
+        /* The head that holds this node may have vanished without closing: its machine
+         * slept or a cable moved as it stopped. Nothing tells a node, which then refused
+         * every head until its service was restarted. So when another head asks, the
+         * holder is tested (net_tcp_probe): one that is gone or silent loses its
+         * connection within seconds, which ends its session, and the head that asked,
+         * which repeats LINK for a while, is accepted. A holder that is alive answers
+         * the probes and keeps the node. */
+        if (s->session_owner!=c->tag && !s->probe_until) {
+            for (int i=0;i<NODE_CLIENTS;++i) if (s->clients[i].fd>=0 && s->clients[i].tag==s->session_owner) net_tcp_probe(s->clients[i].fd,1);
+            int64_t now=net_now_ns(); s->probe_until=(now>0?now:0)+INT64_C(10000000000);
+            log_line("notice","another head asks for this node: testing whether the head that holds it is alive");
+        }
+        resp_error(out,"BUSY session pins linked path"); return;
+    }
     if (v[0].len==6 && same(&v[2],"path") && c->link_session) {
         fr_interface path={0}; struct in_addr ip;
         if (!v[3].len || v[3].len>=sizeof(path.name) || !v[6].len || v[6].len>=sizeof(path.address) ||
@@ -670,6 +779,12 @@ static void dispatch(node *s, client *c, resp_value *v, resp_buf *out) {
     } else if (same(&v[1],"bench-profile")) {
         if (v[0].len!=1) resp_error(out,"ERR wrong number of arguments for BENCH-PROFILE");
         else resp_simple(out,"quick-widths-v1");
+    } else if (same(&v[1],"wire-q8k")) {
+        if (v[0].len!=1) resp_error(out,"ERR wrong number of arguments for WIRE-Q8K");
+#ifdef FR_GSQ_COMPUTE
+        else if (s->units.mask && s->units.backend==&fr_gsq) resp_simple(out,"q8k-v1");
+#endif
+        else resp_simple(out,"unsupported");
     } else if (same(&v[1],"expert-order")) {
         if (v[0].len!=1) resp_error(out,"ERR wrong number of arguments for EXPERT-ORDER");
 #ifdef FR_EXPERT_RANKED
@@ -707,15 +822,33 @@ static void dispatch(node *s, client *c, resp_value *v, resp_buf *out) {
             }
         }
 
+    } else if (same(&v[1],"layout")) {
+        layout_command(s,v,out);
     } else if (same(&v[1],"backend")) {
         backend_command(s,v,out);
     } else if (same(&v[1],"bench")) {
         bench_command(s,c,v,out);
     } else if (same(&v[1],"session")) {
         session_command(s,c,v,out);
+    } else if (same(&v[1],"pace")) {   /* PACE: large replies wait for the head's turn (plane.c) */
+        if (v[0].len!=1 || !s->receiver || s->session_owner!=c->tag) resp_error(out,"ERR PACE (in a session)");
+        else { atomic_store(&s->receiver->paced,1); resp_simple(out,"OK"); }
+    } else if (same(&v[1],"hot")) {   /* HOT layer expert: copy one whole expert into the cache */
+        uint64_t layer,expert; int rc;
+        if (v[0].len!=3 || decimal(&v[2],FR_LAYERS-1,&layer) || decimal(&v[3],FR_ROUTED_EXPERTS-1,&expert) ||
+            !cache_on || !s->receiver || s->session_owner!=c->tag) resp_error(out,"ERR HOT layer expert (in a cache session)");
+        else if ((rc=cache_admit((unsigned)layer,(unsigned)expert))>0) resp_error(out,"FULL cache budget reached");
+        else if (rc) resp_error(out,"ERR expert copy failed");
+        else resp_simple(out,"OK");
+    } else if (same(&v[1],"cold")) {  /* COLD layer expert: give its memory back; the head no longer asks for it here */
+        uint64_t layer,expert;
+        if (v[0].len!=3 || decimal(&v[2],FR_LAYERS-1,&layer) || decimal(&v[3],FR_ROUTED_EXPERTS-1,&expert) ||
+            !cache_on || !s->receiver || s->session_owner!=c->tag) resp_error(out,"ERR COLD layer expert (in a cache session)");
+        else if (cache_evict((unsigned)layer,(unsigned)expert)) resp_error(out,"ERR expert not freed");
+        else resp_simple(out,"OK");
     } else if (same(&v[1],"units")) {
         char text[FR_BLOCKS*68+1]; size_t n=0;
-        for (unsigned b=0;b<FR_BLOCKS;++b) { char hex[65]; if (!fr_units_cached(s->config->state_dir,b,hex)) n+=(size_t)snprintf(text+n,sizeof(text)-n,"%02u %s\n",b,hex); }
+        for (unsigned b=0;b<FR_BLOCKS;++b) { char hex[65]; if (!fr_units_cached(unit_dir(s),b,hex)) n+=(size_t)snprintf(text+n,sizeof(text)-n,"%02u %s\n",b,hex); }
         resp_bulk(out,text,n);
     } else if (same(&v[1],"recv")) {
         recv_command(s,c,v,out);
@@ -764,7 +897,7 @@ static void disconnect(node *s, client *c) {
     if (close(c->fd)<0) log_line("warning","close fd=%d: %s",c->fd,strerror(errno));
     auth_reset(&c->auth);
     if (c->rx_fd>=0) { char tmp[300]; close(c->rx_fd); c->rx_fd=-1; c->rx_left=0;
-        snprintf(tmp,sizeof(tmp),"%s/unit-%02u.tmp",s->config->state_dir,c->rx_block); unlink(tmp); }
+        snprintf(tmp,sizeof(tmp),"%s/unit-%02u.tmp",unit_dir(s),c->rx_block); unlink(tmp); }
     c->link_session=0;
     secure_clear(c->input,sizeof(c->input)); secure_clear(c->output,sizeof(c->output));
     c->fd=-1; --s->connected;
@@ -966,6 +1099,11 @@ int node_run(const fr_config *config, int debug) {
         if (n<0) goto done;
         int64_t now=net_now_ns();
         if (now>0 && now-s.multicast_refreshed>INT64_C(60000000000)) refresh_multicast(&s);
+        if (s.probe_until && now>s.probe_until) {
+            /* The holder answered for ten seconds: it is alive and is left in peace. */
+            for (int k=0;k<NODE_CLIENTS;++k) if (s.clients[k].fd>=0 && s.clients[k].tag==s.session_owner) net_tcp_probe(s.clients[k].fd,0);
+            s.probe_until=0;
+        }
         for (int i=0; i<n; ++i) {
             uint64_t tag=events[i].tag;
             if (tag>=UINT64_MAX-2) {

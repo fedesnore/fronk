@@ -3,6 +3,8 @@
  * burst reuse. Full, resident synthetic ownership blocks defeat small-fixture
  * cache artifacts. No model weights, system tuning or runtime dependencies.
  */
+#include "layout.h"
+#include "gsq.h"
 #include "bench.h"
 #include "neon.h"
 #include "avx2.h"
@@ -15,7 +17,7 @@
 static int quick_valid(const fr_bench_report *r) {
     if (!r || !r->blocks || r->blocks>5 /* bounded installer sweep */ ||
         r->samples!=FR_PLAN_SAMPLES || r->selected_burst || r->burst_max!=4 ||
-        r->resident_bytes!=r->blocks*FR_NATIVE_BLOCK_BYTES || r->workers>256 || r->prefetch>64) return 0;
+        (r->resident_bytes!=r->blocks*FR_NATIVE_BLOCK_BYTES && r->resident_bytes!=r->blocks*fr_unit_bytes()) || r->workers>256 || r->prefetch>64) return 0;
     for (unsigned b=0;b<4;++b) {
         double a=r->percentile[0][b][FR_METAL_TOTAL][0],z=r->percentile[0][b][FR_METAL_TOTAL][1];
         if (!isfinite(a) || !isfinite(z) || a<=0 || z<a || z>1e12) return 0;
@@ -77,7 +79,7 @@ static unsigned fields(const fr_bench_report *r,bench_field f[128]) {
 static int valid(const fr_bench_report *r) {
     if (!r || r->blocks<1 || r->blocks>FR_BLOCKS || r->samples!=FR_BENCH_SAMPLES || r->burst_max!=4 || r->selected_burst>4 ||
         r->workers>32 || (r->prefetch!=0 && r->prefetch!=2) || (!r->workers && r->prefetch) ||
-        (r->working_set!=r->blocks*FR_WEIGHT_BLOCK_BYTES && r->working_set!=r->blocks*FR_NATIVE_BLOCK_BYTES) || r->resident_bytes!=r->working_set ||
+        (r->working_set!=r->blocks*FR_WEIGHT_BLOCK_BYTES && r->working_set!=r->blocks*FR_NATIVE_BLOCK_BYTES && r->working_set!=r->blocks*fr_unit_bytes()) || r->resident_bytes!=r->working_set ||
         r->rss_start<r->working_set || r->rss_end<r->working_set || r->barriers<(r->selected_burst?2:8)*FR_BENCH_SAMPLES ||
         r->hot_allocations || !isfinite(r->elapsed) || r->elapsed<30 ||
         !isfinite(r->sustained_ratio) || r->sustained_ratio<=0 ||
@@ -156,6 +158,8 @@ int fr_bench_parse(const char *text,size_t len,fr_bench_report *out) {
 }
 
 static uint64_t bench_bytes(const fr_bench_report *r,unsigned burst) {
+    if (fr_layout()==FR_LAYOUT_GSQ && r->working_set==r->blocks*fr_unit_bytes())  /* routed slices only */
+        return r->blocks*FR_ACTIVE_ROUTED*burst*fr_slice_bytes_mean();
     return r->working_set==r->blocks*FR_NATIVE_BLOCK_BYTES?
         r->blocks*(FR_ACTIVE_ROUTED*burst*FR_NATIVE_SLICE_BYTES+FR_NATIVE_SHARED_BYTES):
         (uint64_t)(FR_ACTIVE_ROUTED*burst+1)*r->blocks*FR_SLICE_BYTES;
@@ -272,6 +276,9 @@ static int backend_close(const fr_backend *b) {
 #ifdef FR_AVX2_COMPUTE
     if (b==&fr_avx2) return fr_avx2_close();
 #endif
+#ifdef FR_GSQ_COMPUTE
+    if (b==&fr_gsq) return fr_gsq_backend_close();
+#endif
     /* Reference benches use the same load-state guard as self-test. Any other
      * backend (backends/user.c) refuses the benchmark's load into an occupied slot. */
     return b==&fr_ref || b==&fr_ref_q8 ? fr_ref_idle(b):FR_OK;
@@ -288,8 +295,8 @@ int fr_bench_measure_backend(const fr_backend *backend,unsigned blocks,unsigned 
         selected_burst>burst_max || !isfinite(duration) || duration<=0) return FR_INVALID;
     /* Every backend loads the native units the head ships (BACKENDS.md); the
      * legacy Q4_0 layout lives on only in the oracle vectors. */
-    int native=1;
-    size_t unit=native?FR_NATIVE_BLOCK_BYTES:FR_WEIGHT_BLOCK_BYTES;
+    int native=1, gsq=fr_layout()==FR_LAYOUT_GSQ;  /* GSQ units in that layout (layout.h) */
+    size_t unit=gsq?(size_t)fr_unit_bytes():native?FR_NATIVE_BLOCK_BYTES:FR_WEIGHT_BLOCK_BYTES;
     fr_bench_report result={.blocks=blocks,.samples=samples,.burst_max=burst_max,.selected_burst=selected_burst,.working_set=blocks*unit};
     /* A benchmark owns isolated backend state; never evict session weights. */
     int closed=backend_close(backend); if (closed) return closed;
@@ -308,7 +315,8 @@ int fr_bench_measure_backend(const fr_backend *backend,unsigned blocks,unsigned 
         void *p=mmap(NULL,unit,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
         if (p==MAP_FAILED) { rc=FR_IO; break; } weights[b]=p;
         uint64_t seed=UINT64_C(0x9e3779b97f4a7c15)^(UINT64_C(0x94d049bb133111eb)*(b+1));
-        if (native) fr_native_fill(weights[b],(uint32_t)seed);
+        if (gsq) fr_gsq_fill_unit(weights[b],(uint32_t)seed);
+        else if (native) fr_native_fill(weights[b],(uint32_t)seed);
         else for (size_t q=0;q<unit;q+=FR_Q4_BYTES) {
             uint64_t a=random64(&seed),v=random64(&seed);
             uint16_t scale=(uint16_t)(0x1800|((a>>48)&0x83ff)); /* finite, signed, nonzero */
@@ -334,7 +342,8 @@ int fr_bench_measure_backend(const fr_backend *backend,unsigned blocks,unsigned 
     }
     fr_req req={0}; fr_part part;
     for (unsigned t=0;t<FR_MAX_BURST;++t) {
-        for (unsigned e=0;e<FR_ACTIVE_EXPERTS;++e) req.gate[t][e]=e==FR_ACTIVE_ROUTED?0.5f:0.0625f;
+        /* GSQ units hold no shared expert (the head computes it): its gate is 0. */
+        for (unsigned e=0;e<FR_ACTIVE_EXPERTS;++e) req.gate[t][e]=e==FR_ACTIVE_ROUTED?(gsq?0.0f:0.5f):0.0625f;
         for (unsigned d=0;d<FR_HIDDEN;++d) req.x[t][d]=(float)((int)((d*37+t*19)%257)-128)/128;
     }
 #ifdef FR_AVX2_COMPUTE
