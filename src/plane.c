@@ -572,7 +572,8 @@ unsigned fr_head_plane_poll(fr_head_plane *h) {
             int view=-1;
             for (unsigned k=0;k<h->caches;++k) if (h->cache_link[k]>=0 && one==1u<<h->cache_link[k]) view=(int)k;
             ask_again(h,c,one,view);
-            if (!(++h->resends&(h->resends-1))) fprintf(stderr,"fronk: %llu replies asked again so far (lost datagrams recovered without waiting)\n",(unsigned long long)h->resends);
+            ++h->resends;   /* its own statement: read and increment in one expression are unsequenced */
+            if (!(h->resends&(h->resends-1))) fprintf(stderr,"fronk: %llu replies asked again so far (lost datagrams recovered without waiting)\n",(unsigned long long)h->resends);
             c->resend_at=net_now_ns()+c->resend_ns;
         }
     }
