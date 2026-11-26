@@ -241,7 +241,8 @@ $(FRONK_TARGET): src/main.c $(CORE) $(HEADERS) Makefile $(DS4_DEPS) $(BENCH_INPU
 fronk-cli: $(CLI) $(HEADERS) Makefile
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(REQUIRED_FLAGS) $(BUILD_FLAGS) $(CLI) $(LDFLAGS) $(LDLIBS) -o $@
 
-build/test:
+# Every test links $(LDLIBS), which names the GSQ library: build it before the first test.
+build/test: | $(GSQ_LIB)
 	mkdir -p $@
 
 build/test/fronk: src/main.c $(CORE) $(HEADERS) Makefile | build/test
