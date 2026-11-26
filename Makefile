@@ -378,13 +378,16 @@ engine:
 # one build runs on every Apple Silicon head; plus the GPU keepalive. GSQ_LLAMA is
 # a prepared source tree (tools/engine/gsq/prepare.sh makes one from the pinned
 # public commit and the patch).
+# LLAMA_USE_PREBUILT_UI=OFF: by default llama.cpp downloads the newest files of its
+# web page during the build and stops if they are not the ones this commit expects.
+# The engine is started with --no-webui, so it is built without them.
 GSQ_LLAMA ?= $(CURDIR)/build/gsq-source
 .PHONY: gsq-engine
 gsq-engine:
 	@if [ ! -f "$(GSQ_LLAMA)/CMakeLists.txt" ]; then bash tools/engine/gsq/prepare.sh "$(GSQ_LLAMA)"; fi
 	cmake -S "$(GSQ_LLAMA)" -B "$(GSQ_LLAMA)/build-fronk" -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
 	  -DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8.4-a+fp16+dotprod -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON \
-	  -DBUILD_SHARED_LIBS=OFF -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF
+	  -DBUILD_SHARED_LIBS=OFF -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF
 	cmake --build "$(GSQ_LLAMA)/build-fronk" --target llama-server -j
 	mkdir -p build/gsq-engine
 	cp "$(GSQ_LLAMA)/build-fronk/bin/llama-server" build/gsq-engine/fronk-llama-server
