@@ -16,7 +16,9 @@ install_node() {
     printf '%s\n' module-test | bash "$manager" --prefix "$prefix" --role node --name module-test \
         --yes --secret-stdin --no-service --no-measure "$@"
 }
-install_node --backend-module "$work/alpha source" --backend-module "$work/beta" --backend beta > "$work/install.log" 2>&1 || { cat "$work/install.log"; exit 1; }
+# A failed build leaves its reason in the build log, which the trap would remove with $work.
+install_node --backend-module "$work/alpha source" --backend-module "$work/beta" --backend beta > "$work/install.log" 2>&1 ||
+    { cat "$work/install.log"; [[ ! -f $prefix/state/build.log ]] || { echo "== last lines of build.log"; tail -n 60 "$prefix/state/build.log"; }; exit 1; }
 [[ $(cat "$prefix/state/backend") == beta ]]
 [[ -f $prefix/modules/alpha/backend.json && -f $prefix/modules/beta/backend.json ]]
 "$prefix/src/fronk" backends --list | grep -q 'alpha.*runs here'
