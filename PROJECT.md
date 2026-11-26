@@ -17,6 +17,7 @@ way, and how to find the implementation.
 
 **In this guide:**
 [head and nodes](#head-and-nodes-are-different-components) ·
+[two engines, two formats](#two-head-engines-two-unit-formats) ·
 [cables](#physical-topology-is-part-of-the-design) ·
 [what each machine needs](#what-each-machine-needs) ·
 [startup](#startup-head-first-then-nodes) ·
@@ -60,6 +61,28 @@ A **node backend** implements that compute contract for a particular CPU or
 GPU. It is separate from the head's dense engine. Adding a backend lets a node
 use different hardware while keeping the same installer, planner and network
 protocol. It does not by itself add a new dense-head engine.
+
+## Two head engines, two unit formats
+
+Everything in this guide describes the release: the Q4 file, with a head built on
+ds4. The source also has a second path for the same model, which keeps the same
+division of work and changes three things.
+
+| | Release path | GSQ path |
+|---|---|---|
+| Model file | Q4, 177.28 GB | GSQ-RCO IQ3_XXS, 47.04 GB plus an n-gram table on disk |
+| Head's dense engine | ds4, linked into `fronk head` | llama.cpp, a separate process that calls `fronk head` at every layer |
+| Expert units | 20 × 3.35 GB, shared expert included | 20 × 2.185 GB, routed experts only |
+| Node backends | `metal`, `metal-ssd`, `neon`, `avx2` | `gsq` (CPU) |
+| Kinds of node | Slice nodes | Slice nodes, and optional caches of whole experts |
+
+The second engine exists because the smaller file uses quantization formats that
+ds4 does not read and llama.cpp does. The head and the node keep their roles: the
+engine owns the dense part and the choice of tokens, the nodes own slices. What
+is new on the node side is the cache, a machine that holds the experts in use
+whole instead of a share of all of them. [GSQ.md](docs/GSQ.md) explains the
+reasons, the two kinds of node and the build. The numbers and sizes in the rest
+of this guide are the release path's.
 
 ## Physical topology is part of the design
 
@@ -328,6 +351,9 @@ The LAN traffic is authenticated for control but not encrypted. See
 | Console and chat | [fronk-web.py](tools/fronk-web.py), [fronk-web.html](tools/fronk-web.html), [fronk-chat.html](tools/fronk-chat.html) | Process control, status parsing, chat proxy |
 | Installer | [tools/install](tools/install) | `fronk-install.sh`, `onboard.sh`, `service.sh`, `manager.py` |
 | Metal engine build | [tools/engine](tools/engine), [stage-ds4.sh](tools/mtp/stage-ds4.sh) | Pinned upstream patch and source manifest |
+| llama.cpp engine (GSQ) | [tools/engine/gsq](tools/engine/gsq), [fronk_engine.py](tools/fronk_engine.py) | `prepare.sh`, the patch's `llama-fronk.h`, the header of `run.sh` |
+| GSQ units and kernels | [layout.h](src/layout.h), [gsq.h](src/gsq.h), [gsq_multi.c](src/gsq_multi.c), [gsq_down.c](src/gsq_down.c), [backends/gsq.c](backends/gsq.c) | The two header comments, then `fr_gsq_slice` |
+| Expert caches (GSQ) | [hot.h](src/hot.h), [hot.c](src/hot.c) | The comment that opens `hot.h` |
 | Vulkan head | [tools/gpu-head](tools/gpu-head) | Build, GPU probe, expert hook and launcher |
 | Tests | [tests](tests) | Small fixtures and numerical checks |
 

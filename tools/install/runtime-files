@@ -67,3 +67,4 @@ tools/gpu-keepalive.m
 tools/gsq-mtp-build.py
 tools/caffeinate-plus-linux.sh
 docs/PLAN-gsq-rco.md
+docs/GSQ.md
