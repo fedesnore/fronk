@@ -18,6 +18,7 @@ came with it.
 [the unit format](#the-unit-format) ·
 [build and start](#build-and-start) ·
 [checks](#checks) ·
+[measured speed](#measured-speed) ·
 [limits](#limits)
 
 ## Why a second engine
@@ -214,6 +215,28 @@ to return to its default. The header of
 | `tools/gsq-multicheck.c` | The multi-token kernels against ggml's single-token ones, bit for bit |
 | Head start | Before serving, the head sends one layer through the real cluster and compares the sum with an oracle computed from the model file, for a 2-token call and for a 32-token one |
 | `FRONK_MOE_LOOPBACK=ref` | The patched engine against the unpatched graph |
+
+## Measured speed
+
+One measurement, on the author's five computers, with the placement the planner
+chose by itself from its measurements of machines and links (16 November 2026):
+
+| Machine | Memory | Link to the head | Units |
+|---|---:|---|---:|
+| MacBook Pro M4 Pro (head) | 24 GB | | dense part |
+| HP laptop, Ryzen 7 5825U | 32 GB | 2.5 Gb/s Ethernet | 9 |
+| iMac, Intel i5-7600K | 24 GB | Thunderbolt | 6 |
+| MacBook Pro M1 Pro | 16 GB | Thunderbolt | 3 |
+| Shuttle, Intel i5-10210U | 16 GB | 1 Gb/s Ethernet | 2 |
+
+**25.8 tokens per second**, the median of 30 replies requested through the API:
+24.5 on prose and 29.1 on code, with single replies between 14.7 and 39.8. The
+workload was ten fixed requests, five for prose and five for code, 128 tokens
+each at temperature 0, three times. MTP drafts were on, and the full model
+accepted 89% of the drafted tokens.
+
+This is one cluster, one placement and short replies. It is not a promise for
+other machines or for long conversations.
 
 ## Limits
 
