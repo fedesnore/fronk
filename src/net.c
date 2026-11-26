@@ -49,6 +49,19 @@ int net_tcp_listen(const char *ip, unsigned port) {
         bind(fd,(struct sockaddr *)&addr,sizeof(addr))<0 || listen(fd,64)<0) return fail(fd);
     return fd;
 }
+void net_tcp_probe(int fd, int on) {
+    int idle=1, every=1, tries=4;
+    if (on) {
+#ifdef __APPLE__
+        (void)setsockopt(fd,IPPROTO_TCP,TCP_KEEPALIVE,&idle,sizeof(idle));
+#else
+        (void)setsockopt(fd,IPPROTO_TCP,TCP_KEEPIDLE,&idle,sizeof(idle));
+#endif
+        (void)setsockopt(fd,IPPROTO_TCP,TCP_KEEPINTVL,&every,sizeof(every));
+        (void)setsockopt(fd,IPPROTO_TCP,TCP_KEEPCNT,&tries,sizeof(tries));
+    }
+    (void)setsockopt(fd,SOL_SOCKET,SO_KEEPALIVE,&on,sizeof(on));
+}
 int net_tcp_accept(int listener) {
     int fd;
     do { fd=accept(listener,NULL,NULL); } while (fd<0 && errno==EINTR);

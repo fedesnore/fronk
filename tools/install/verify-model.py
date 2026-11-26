@@ -3,6 +3,11 @@
 model-units.sha256 is the output of fr_manifest for that exact GGUF. The native
 head still hashes units during transfer, and still builds its own manifest for
 models configured outside the installer.
+
+    verify-model.py FILE STATE BYTES SHA256 [--cache NAME --no-manifest]
+
+--cache names the verification stamp (one per file when a model has several
+shards); --no-manifest only verifies: the GSQ head builds its unit manifest itself.
 """
 import hashlib
 import json
@@ -23,12 +28,12 @@ def replace(path, data):
     temp.replace(path)
 
 
-def verify(path, state, size, digest):
+def verify(path, state, size, digest, cache_name="model.verified", manifest=True):
     path = path.resolve(strict=True)
     stamp = identity(path, path.stat(), digest)
     if stamp["bytes"] != size:
         raise ValueError(f"wrong model size ({stamp['bytes']} bytes, expected {size})")
-    cache = state / "model.verified"
+    cache = state / cache_name
     try:
         cached = json.loads(cache.read_text())
     except (FileNotFoundError, ValueError):
@@ -55,6 +60,8 @@ def verify(path, state, size, digest):
         if identity(path, path.stat(), digest) != stamp:
             raise ValueError("the GGUF changed during verification; retry")
         replace(cache, json.dumps(stamp)+"\n")
+    if not manifest:
+        return
     template = Path(__file__).with_name("model-units.sha256").read_text().splitlines()
     if (len(template) != 21 or template[0] != "gguf-sha256 "+digest or
             not all(re.fullmatch(f"unit-{i:02d} [a-f0-9]{{64}}", line) for i, line in enumerate(template[1:]))):
@@ -64,6 +71,14 @@ def verify(path, state, size, digest):
 
 if __name__ == "__main__":
     try:
-        verify(Path(sys.argv[1]), Path(sys.argv[2]), int(sys.argv[3]), sys.argv[4])
+        args = sys.argv[1:]
+        cache, manifest = "model.verified", True
+        if "--no-manifest" in args:
+            args.remove("--no-manifest"); manifest = False
+        if "--cache" in args:
+            i = args.index("--cache"); cache = args[i+1]; del args[i:i+2]
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", cache):
+            raise ValueError("invalid cache name")
+        verify(Path(args[0]), Path(args[1]), int(args[2]), args[3], cache, manifest)
     except (OSError, ValueError) as error:
         sys.exit("Fronk model verification: "+str(error))

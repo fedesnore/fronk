@@ -26,6 +26,6 @@ int main(void) {
     check(FR_EXPERT_BYTES == UINT64_C(68080435200), "Q4_0 bytes include scales");
     check(FR_WEIGHT_BLOCK_BYTES == UINT64_C(3404021760), "one block across all experts/layers");
     check(FR_WEIGHT_BLOCK_BYTES * FR_BLOCKS == FR_EXPERT_BYTES, "partition loses no bytes");
-    check(FR_MAX_BURST == 8 && FR_BENCH_BURST_MAX == 4, "binding burst limits");
+    check(FR_MAX_BURST == 32 && FR_BENCH_BURST_MAX == 4, "binding burst limits: 32-token prompt calls, 4-token decode");
     return test_end();
 }

@@ -14,6 +14,85 @@ static void put32(unsigned char *p,uint32_t v) { for (unsigned i=0;i<4;++i) p[i]
 static uint32_t get32(const unsigned char *p) { return (uint32_t)p[0]<<24|(uint32_t)p[1]<<16|(uint32_t)p[2]<<8|p[3]; }
 static unsigned get16(const unsigned char *p) { return (unsigned)p[0]<<8|p[1]; }
 static void header(unsigned char *out,size_t size) { memset(out,0,size); memcpy(out,"FRK1",4); }
+/* Q8_K transport uses an explicit endian-stable layout; no native struct is
+ * sent. Quantization remains the backend's existing operation on rounded x. */
+static const unsigned q8_start[4]={0,3,6,8},q8_count[4]={3,3,2,2};
+static int q8_valid(const unsigned char *q) {
+    float scale;memcpy(&scale,q,4);
+    if(!isfinite(scale)) return 0;
+    for(unsigned group=0;group<16;++group) {
+        int sum=0;int16_t saved;
+        for(unsigned j=0;j<16;++j) sum+=(int8_t)q[4+group*16+j];
+        memcpy(&saved,q+260+2*group,2);
+        if(sum!=saved) return 0;
+    }
+    return 1;
+}
+static int q8_routing_valid(const fr_req *req,unsigned t) {
+    for(unsigned e=0;e<FR_ACTIVE_ROUTED;++e) {
+        if(req->expert[t][e]>=FR_ROUTED_EXPERTS) return 0;
+        for(unsigned j=0;j<e;++j) if(req->expert[t][j]==req->expert[t][e]) return 0;
+    }
+    for(unsigned e=0;e<FR_ACTIVE_EXPERTS;++e)
+        if(!isfinite(req->gate[t][e]) || req->gate[t][e]<0) return 0;
+    return 1;
+}
+size_t fr_req_q8_encode(unsigned char *out,size_t capacity,const fr_req *req,
+                       const unsigned char xq[FR_MAX_BURST][FR_Q8_TOKEN_BYTES],
+                       uint32_t session,uint32_t step,unsigned fragment) {
+    if(!out || !req || !xq || !session || req->layer>=FR_LAYERS ||
+       !req->burst || req->burst>FR_MAX_BURST || fragment>=4*req->burst) return 0;
+    unsigned token=fragment/4,range=fragment%4,blocks=q8_count[range];
+    size_t size=32+blocks*FR_Q8_BLOCK_BYTES+(range?0:FR_ROUTING_BYTES);
+    if(capacity<size || (!range && !q8_routing_valid(req,token))) return 0;
+    const unsigned char *in=xq[token]+q8_start[range]*FR_Q8_BLOCK_BYTES;
+    for(unsigned b=0;b<blocks;++b) if(!q8_valid(in+b*FR_Q8_BLOCK_BYTES)) return 0;
+    header(out,32);out[4]=5;out[5]=255;out[6]=(unsigned char)req->burst;
+    put32(out+8,session);put32(out+12,step);put16(out+16,req->layer);put16(out+18,fragment);put32(out+20,(uint32_t)size-24);
+    put16(out+24,token);put16(out+26,q8_start[range]*256);put16(out+28,blocks*256);
+    for(unsigned b=0;b<blocks;++b) {
+        const unsigned char *q=in+b*FR_Q8_BLOCK_BYTES;unsigned char *p=out+32+b*FR_Q8_BLOCK_BYTES;
+        uint32_t scale;memcpy(&scale,q,4);put32(p,scale);memcpy(p+4,q+4,256);
+        for(unsigned i=0;i<16;++i) { uint16_t sum;memcpy(&sum,q+260+2*i,2);put16(p+260+2*i,sum); }
+    }
+    if(!range) {
+        unsigned char *p=out+32+blocks*FR_Q8_BLOCK_BYTES;
+        for(unsigned e=0;e<FR_ACTIVE_ROUTED;++e) put16(p+2*e,req->expert[token][e]);
+        for(unsigned e=0;e<FR_ACTIVE_EXPERTS;++e) {
+            uint32_t bits;memcpy(&bits,&req->gate[token][e],4);put32(p+2*FR_ACTIVE_ROUTED+4*e,bits);
+        }
+    }
+    return size;
+}
+static int q8_fragment_read(const unsigned char *p,size_t len,fr_fragment *out) {
+    fr_fragment f={.type=5,.node=p[5],.burst=p[6],.session=get32(p+8),.step=get32(p+12),
+        .layer=get16(p+16),.fragment=get16(p+18),.token=get16(p+24),.start=get16(p+26)};
+    unsigned range=f.fragment%4,blocks=q8_count[range];
+    size_t size=32+blocks*FR_Q8_BLOCK_BYTES+(range?0:FR_ROUTING_BYTES);
+    if(memcmp(p,"FRK1",4) || p[4]!=5 || f.node!=255 || p[7] || !f.session || !f.burst || f.burst>FR_MAX_BURST ||
+       f.layer>=FR_LAYERS || f.fragment>=4*f.burst || f.token!=f.fragment/4 || f.start!=q8_start[range]*256 ||
+       get16(p+28)!=blocks*256 || get16(p+30) || len!=size || get32(p+20)!=size-24) return -1;
+    for(unsigned b=0;b<blocks;++b) {
+        const unsigned char *src=p+32+b*FR_Q8_BLOCK_BYTES;unsigned char *q=f.q8+b*FR_Q8_BLOCK_BYTES;
+        uint32_t scale=get32(src);memcpy(q,&scale,4);memcpy(q+4,src+4,256);
+        for(unsigned i=0;i<16;++i) { uint16_t sum=(uint16_t)get16(src+260+2*i);memcpy(q+260+2*i,&sum,2); }
+        if(!q8_valid(q)) return -1;
+    }
+    if(!range) {
+        const unsigned char *r=p+32+blocks*FR_Q8_BLOCK_BYTES;
+        for(unsigned e=0;e<FR_ACTIVE_ROUTED;++e) {
+            f.expert[e]=(uint16_t)get16(r+2*e);
+            if(f.expert[e]>=FR_ROUTED_EXPERTS) return -1;
+            for(unsigned j=0;j<e;++j) if(f.expert[j]==f.expert[e]) return -1;
+        }
+        for(unsigned e=0;e<FR_ACTIVE_EXPERTS;++e) {
+            uint32_t bits=get32(r+2*FR_ACTIVE_ROUTED+4*e);memcpy(&f.gate[e],&bits,4);
+            if(!isfinite(f.gate[e]) || f.gate[e]<0) return -1;
+        }
+    }
+    *out=f;return 0;
+}
+
 size_t fr_req_encode(unsigned char *out,size_t capacity,const fr_req *req,
                      const uint16_t activations[FR_MAX_BURST][FR_HIDDEN],
                      uint32_t session,uint32_t step,unsigned fragment) {
@@ -73,6 +152,7 @@ size_t fr_frame_next(const unsigned char *p,size_t left) {
 int fr_fragment_read(const void *data,size_t len,fr_fragment *out) {
     if (!data || !out || len<32) return -1;
     const unsigned char *p=data;
+    if(p[4]==5) return q8_fragment_read(p,len,out);
     fr_fragment f={.type=p[4],.node=p[5],.burst=p[6],.session=get32(p+8),
         .step=get32(p+12),.layer=get16(p+16),.fragment=get16(p+18),
         .token=get16(p+24),.start=get16(p+26)};
