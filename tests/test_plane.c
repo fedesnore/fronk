@@ -3,6 +3,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include "../src/hot.h"
+/* No expert cache in this test: every expert belongs to the slices. hot.c, which
+ * owns this table, is not linked here. */
+_Atomic uint8_t fr_hot_owner[FR_LAYERS][FR_ROUTED_EXPERTS];
 static int slow_run(const fr_req *r,fr_part *p) {
     struct timespec delay={.tv_nsec=10000000}; nanosleep(&delay,NULL);
     memset(p,0,sizeof(*p)); p->layer=r->layer; p->burst=r->burst;
