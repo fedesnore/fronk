@@ -104,6 +104,9 @@ run_demo() {
 guide_nodes() {
     step "Head · Plan your nodes"
     say "Quit any running Fronk head before verification. Keep each node running."
+    # A program built a minute ago is new to macOS: its first use of the network opens
+    # a permission window, and until it is allowed every node looks unreachable.
+    [[ $OS != Darwin ]] || say "If macOS asks to let Fronk find devices on your local network, choose Allow: without it the head cannot reach the nodes."
     local planned name seen=" " index=0 answer entry snapshot previous=""
     local -a roster
     [[ -f $STATE/install-nodes ]] && previous=$(cat "$STATE/install-nodes")
@@ -131,9 +134,10 @@ guide_nodes() {
             continue
         fi
         say "If $name is already running, stay on the head and choose Verify. For a new node:"
-        say "Go to $name. Connect it to the head's LAN and open the same Fronk Installer Manager there."
+        say "Go to $name. Connect it to the head's LAN and open the same Fronk installer there."
         say "Choose Node, select $name (or custom-name if needed) and paste the head's pairing code. Start the service and allow local network access."
-        say "Terminal alternative on $name (from the download folder): bash fronk-manager.sh --role node --name $name"
+        say "In a terminal on $name, from the Fronk source: bash install.sh node -- --name $name"
+        say "(with a downloaded manager instead: bash fronk-manager.sh --role node --name $name)"
         say "When $name reports that its service has started (or the manual worker is listening), return to THIS HEAD and choose Verify."
         while :; do
             answer=$(ask "Back on the head: verify $name now or finish node setup later?" verify "verify|later")
@@ -155,10 +159,19 @@ guide_nodes() {
                 say "Missing or duplicate node names:$missing"
             fi
             say "On the affected node, check its name, pairing secret, running service and network permission. Then retry here."
+            [[ $OS != Darwin ]] || say "On this Mac, check System Settings > Privacy & Security > Local Network: fronk must be switched on there."
             ((yes)) && die "node verification failed for $name. Install and start it, then rerun on the head: --join-nodes --yes --nodes '${roster[*]}'"
         done
     done
     say "All ${#roster[@]} planned nodes authenticated in the same head check."
+    nodes_verified=1
+    if gsq_engine; then
+        # The synthetic demo builds and times units of the Q4 format (3.35 GB each).
+        # For this engine the fit and the timings come from the real plan at start.
+        say "This head uses the 3-bit weights: the trial on synthetic units is skipped, because it measures the other format."
+        say "The first start shows the real plan, with each machine's memory and timings, and asks before loading anything."
+        return
+    fi
     if ((demo_later)) || [[ $(ask "All nodes are connected. Run the weight-free demo now or finish later?" demo "demo|later") == later ]]; then
         say "Demo pending. Choose join-nodes on the head when the machines are ready."
         return
@@ -166,9 +179,16 @@ guide_nodes() {
     run_demo
 }
 
+gsq_engine() { [[ $(awk '$1=="ds4" {print $2;exit}' "$CONF") == tools/engine/gsq/run.sh ]]; }
+
 head_setup() {
     while :; do
         guide_nodes
+        if gsq_engine; then
+            # Model questions come once every planned node has answered the head.
+            [[ ${nodes_verified:-0} != 1 ]] || configure_model
+            return
+        fi
         # A saved demo result must not override an explicit pause after pairing.
         (( !demo_later )) || return 0
         if ! demo_done; then
@@ -187,29 +207,70 @@ head_setup() {
 }
 
 # GSQ head: both shards in one folder (pinned names, sizes, SHA-256), and the MTP
-# head beside that folder. Local files only; the head builds its unit manifest.
+# head beside that folder. The head builds its unit manifest itself.
+gsq_fetch() { # URL FILE BYTES: download or resume until the file has its exact size
+    local have=0
+    [[ -f $2 ]] && have=$(wc -c < "$2" | tr -d ' ')
+    ((have == $3)) && return 0
+    ((have < $3)) || die "$2 is larger than the pinned file; move it away and retry"
+    curl -fL --retry 5 --retry-delay 5 -C - -o "$2" "$1"
+}
 configure_model_gsq() {
     step "Head · Model weights (GSQ-RCO IQ3_XXS)"
-    say "Supported files: $GSQ_MODEL_NAME and $GSQ_SHARD2_NAME from $GSQ_MODEL_URL"
-    local existing path dir
+    say "Two files, 47.0 GB and 28.8 GB: $GSQ_MODEL_NAME and $GSQ_SHARD2_NAME"
+    say "Source and license: $GSQ_MODEL_URL"
+    local existing path dir choice found="" candidate free have1=0 have2=0 mtp
     existing=$(awk '$1=="model" {print $2;exit}' "$CONF")
-    if [[ -z $model ]]; then
+    if [[ -z $model ]] && ((!download)); then
         if [[ -n $existing && -f $existing ]]; then model=$existing
-        elif ((yes)); then say "Model setup pending. Resume with $PREFIX/bin/fronk-manager --configure-model --model FOLDER."; return
-        else model=$(ask "Full path of $GSQ_MODEL_NAME or the folder containing both shards" ""); fi
+        else
+            for candidate in "$PREFIX/models/IQ3_XXS" "$HOME/Downloads" /Volumes/*/IQ3_XXS /Volumes/* /media/*/*/IQ3_XXS /mnt/*/IQ3_XXS; do
+                if [[ -f $candidate/$GSQ_MODEL_NAME ]]; then found=$candidate; say "Found the first file in $found"; break; fi
+            done
+            if ((yes)) && [[ -z $found ]]; then say "Model setup pending. Resume with $PREFIX/bin/fronk-manager --configure-model --model FOLDER (or --download)."; return; fi
+            choice=$(ask "Use files already on this Mac or an external drive, download 75.8 GB, or finish later?" "$([[ -n $found ]] && echo local || echo download)" "local|download|later")
+            case $choice in
+                local) model=$(ask "Folder containing both files (drag it here)" "$found") ;;
+                download) download=1 ;;
+                later) say "Model setup pending. Resume on the head with $PREFIX/bin/fronk-manager --configure-model."; return ;;
+                *) die "choose local, download or later" ;;
+            esac
+        fi
+    fi
+    if ((download)); then
+        command -v curl >/dev/null || die "curl is required to download the weights; install curl or choose files already on disk"
+        [[ -n $download_dir ]] || download_dir=$(ask "Download folder on this Mac or an external drive (no spaces in its path)" "$PREFIX/models/IQ3_XXS")
+        [[ $download_dir == /* ]] || die "choose an absolute download folder"
+        [[ $download_dir =~ ^/[A-Za-z0-9._/-]+$ ]] || die "choose a download folder whose path has no spaces"
+        mkdir -p "$download_dir"
+        [[ -f $download_dir/$GSQ_MODEL_NAME ]] && have1=$(wc -c < "$download_dir/$GSQ_MODEL_NAME" | tr -d ' ')
+        [[ -f $download_dir/$GSQ_SHARD2_NAME ]] && have2=$(wc -c < "$download_dir/$GSQ_SHARD2_NAME" | tr -d ' ')
+        free=$(df -Pk "$download_dir" | awk 'END {print $4}')
+        ((free*1024 >= GSQ_MODEL_BYTES-have1 + GSQ_SHARD2_BYTES-have2 + 2147483648)) ||
+            die "too little disk space in $download_dir for the two files (75.8 GB); choose another folder or an external drive"
+        say "Downloading into $download_dir. An interrupted download continues where it stopped: run the same step again."
+        gsq_fetch "$GSQ_RESOLVE_URL/$GSQ_MODEL_NAME" "$download_dir/$GSQ_MODEL_NAME" "$GSQ_MODEL_BYTES" || die "the download of the first file stopped; run this step again to continue it"
+        gsq_fetch "$GSQ_RESOLVE_URL/$GSQ_SHARD2_NAME" "$download_dir/$GSQ_SHARD2_NAME" "$GSQ_SHARD2_BYTES" || die "the download of the second file stopped; run this step again to continue it"
+        model=$download_dir
     fi
     [[ ! -d $model ]] || model=${model%/}/$GSQ_MODEL_NAME
     [[ -f $model ]] || die "model file not found: $model"
     path=$(cd "$(dirname "$model")" && pwd -P)/$(basename "$model"); dir=$(dirname "$path")
     [[ $(basename "$path") == "$GSQ_MODEL_NAME" ]] || die "the GSQ head needs $GSQ_MODEL_NAME (shard 1)"
+    [[ $path =~ ^/[A-Za-z0-9._/-]+$ && ${#path} -le 480 ]] || die "move the two files to a folder whose path has no spaces"
+    say "Checking the files against their published digests (a few minutes each, once)."
     python3 "$HERE/verify-model.py" "$path" "$STATE" "$GSQ_MODEL_BYTES" "$GSQ_MODEL_SHA256" --cache gsq-shard1.verified --no-manifest ||
-        die "GSQ shard 1 verification failed"
-    [[ -f $dir/$GSQ_SHARD2_NAME ]] || die "shard 2 must be next to shard 1: $dir/$GSQ_SHARD2_NAME"
+        die "the first file does not match the published one; delete it and download it again"
+    [[ -f $dir/$GSQ_SHARD2_NAME ]] || die "the second file must be next to the first: $dir/$GSQ_SHARD2_NAME"
     python3 "$HERE/verify-model.py" "$dir/$GSQ_SHARD2_NAME" "$STATE" "$GSQ_SHARD2_BYTES" "$GSQ_SHARD2_SHA256" --cache gsq-shard2.verified --no-manifest ||
-        die "GSQ shard 2 verification failed"
-    if [[ -f $dir/../$GSQ_MTP_NAME ]]; then say "MTP head found: $(cd "$dir/.." && pwd -P)/$GSQ_MTP_NAME"
-    else say "No MTP head at $dir/../$GSQ_MTP_NAME: the engine drafts with n-grams (slower). Build it with tools/gsq-mtp-build.py."; fi
-    [[ $path =~ ^/[A-Za-z0-9._/-]+$ && ${#path} -le 480 ]] || die "move the shards to a folder whose path has no spaces"
+        die "the second file does not match the published one; delete it and download it again"
+    mtp=$(cd "$dir/.." && pwd -P)/$GSQ_MTP_NAME
+    if [[ -f $mtp ]]; then say "Draft model found: $mtp"
+    elif { ((yes)) && ((download)); } || { ((!yes)) && [[ $(ask "Build the draft model now? It downloads 1.5 GB and makes replies about twice as fast." build "build|later") == build ]]; }; then
+        say "Building $mtp (it reads 1.5 GB of the original model over the network)."
+        if python3 "$WORK/tools/gsq-mtp-build.py" "$path" "$mtp.part" && mv "$mtp.part" "$mtp"; then say "Draft model ready."
+        else rm -f "$mtp.part"; say "The draft model could not be built now. The head works without it, more slowly. Retry later: python3 $WORK/tools/gsq-mtp-build.py $path $mtp"; fi
+    else say "Without the draft model the head works, more slowly. Build it later: python3 $WORK/tools/gsq-mtp-build.py $path $mtp"; fi
     set_conf model "$path"
     model_ready=1
     say "Verified GSQ weights configured. Start the head with $PREFIX/bin/fronk-head or open $PREFIX/bin/fronk-console."

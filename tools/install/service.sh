@@ -41,7 +41,7 @@ wait_for_node() {
             awk -v n="$node_name" -v id="$(cat "$STATE/node.id")" -v pid="$service_pid" '
                 {sub(/\r$/,"")} $0=="name:"n {a=1} $0=="id:"id {b=1} $0=="pid:"pid {c=1}
                 END {exit !(a && b && c)}' <<< "$info"; then
-            say "Node $node_name service started and authenticated. Return to the HEAD and choose Verify, then run the demo to check its data connection."
+            say "Node $node_name service started and authenticated. Return to the HEAD and choose Verify there."
             return 0
         fi
         sleep 1
