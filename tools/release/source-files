@@ -2,6 +2,7 @@
 # Local configurations, administration scripts and run history stay outside it.
 .gitignore
 .gitattributes
+install.sh
 configs/head.conf
 configs/node.conf
 port_sources/shuttle-avx2
