@@ -7,6 +7,14 @@ head, and it takes care of the network too.
 Advanced users can follow the steps below, or the
 [complete procedure with commands](#advanced-the-complete-procedure-with-commands).
 
+**From the source, with the llama.cpp head and the smaller 3-bit weights**, there
+is a shorter way: `bash install.sh head` on the Apple Silicon Mac, then
+`bash install.sh node` on each other computer. The script checks the computer,
+offers to install the build tools that are missing and then leads the same
+head-first sequence described here. See
+[the short way](GSQ.md#the-short-way); the rest of this page describes the
+0.3.0 managers and the Q4 file.
+
 Begin on the **head**, which runs the dense part of the model on its GPU and
 coordinates chat. Keep its manager open while visiting the nodes. A **node**
 holds and computes expert slices through its CPU or GPU backend; it receives

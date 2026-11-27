@@ -296,7 +296,9 @@ gpu_head=0
 gsq_head=0
 if [[ $role == head && $engine == gsq ]]; then
     [[ $OS == Darwin && $ARCH == arm64 ]] || die "the GSQ head engine runs on Apple Silicon"
-    [[ -x $SRC_TREE/build/gsq-engine/fronk-llama-server ]] || die "the GSQ engine is not built: run make gsq-engine in the Fronk source first"
+    if [[ ! -x $SRC_TREE/build/gsq-engine/fronk-llama-server ]]; then
+        for tool in cmake git; do command -v "$tool" >/dev/null || die "building the llama.cpp engine needs $tool (bash install.sh head installs what is missing)"; done
+    fi
     gsq_head=1
 elif [[ $role != head && -n $engine ]]; then die "--engine applies to a head"
 fi
@@ -385,6 +387,12 @@ if ((gpu_head)); then
     say "The dense layers will load on $device ($((gpu_bytes/1048576)) MiB, $gpu_memory memory). Fronk can assign expert blocks to this machine's CPU and system RAM alongside the other nodes."
 elif ((gsq_head)); then
     step "Head · GSQ engine"
+    if [[ ! -x $SRC_TREE/build/gsq-engine/fronk-llama-server ]]; then
+        say "Building the llama.cpp engine: it downloads llama.cpp (about 100 MB) and compiles for 5 to 15 minutes."
+        say "Progress is in $STATE/build-engine.log"
+        make -C "$SRC_TREE" gsq-engine >"$STATE/build-engine.log" 2>&1 ||
+            die "the engine build failed; the reason is at the end of $STATE/build-engine.log. Run the same command again after fixing it: finished parts are kept."
+    fi
     mkdir -p "$stage/build/gsq-engine"
     cp "$SRC_TREE/build/gsq-engine/fronk-llama-server" "$stage/build/gsq-engine/"
     [[ ! -x $SRC_TREE/build/gsq-engine/gpu-keepalive ]] || cp "$SRC_TREE/build/gsq-engine/gpu-keepalive" "$stage/build/gsq-engine/"
@@ -434,7 +442,14 @@ fi
 if ((gsq_head)); then
     set_conf ds4 tools/engine/gsq/run.sh
     set_conf burst 4   # one MTP verification pass carries up to 4 tokens
-    [[ -f $STATE/ds4-ctx ]] || echo 65536 > "$STATE/ds4-ctx"
+    # Engine settings for a first start, written once and never over a file that
+    # is there (gsq-head-settings.sh says which and why).
+    gsq_settings=$(bash "$HERE/gsq-head-settings.sh" "$STATE" "$(sysctl -n hw.memsize)") ||
+        die "could not write the engine settings in $STATE"
+    # Requests travel as Q8_K (3,112 bytes a token instead of 5,312): the form the
+    # GSQ kernels read anyway. The head refuses to start if a node does not confirm
+    # it; remove the file to return to FP16 requests.
+    [[ -f $STATE/wire-q8k || -f $STATE/wire-q8k.off ]] || : > "$STATE/wire-q8k"
 fi
 if ((gpu_head)); then
     set_conf ds4 tools/gpu-head/run.sh
@@ -465,7 +480,13 @@ mv "$STATE/install-files.new" "$STATE/install-files"
 printf '%s\n' "$role" > "$STATE/install-role"
 printf '%s\n' "$role" > "$PREFIX/.fronk-manager"
 if [[ $role == head ]]; then
-    if ((gsq_head)); then say "Dense head engine: llama.cpp (GSQ-RCO IQ3_XXS) on the Apple GPU."
+    if ((gsq_head)); then
+        say "Dense head engine: llama.cpp (GSQ-RCO IQ3_XXS) on the Apple GPU."
+        if [[ -n $gsq_settings ]]; then
+            say "Engine settings for a first start, one-line files in $STATE:"
+            say "$gsq_settings"
+            say "Remove a file to return to the engine's default (docs/GSQ.md lists them)."
+        fi
     elif ((!gpu_head)); then say "Dense head engine: ds4 Metal on the Apple GPU."; fi
     step "Head · Backend for local expert blocks"
     say "This choice controls expert blocks assigned to this computer. The dense model runs on the GPU."

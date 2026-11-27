@@ -40,7 +40,9 @@ the model file, so that test passed with this mix whenever the cluster ran.
 
 So the tag reproduces the head and the engine exactly, and each node within
 the patch listed above. A cluster built entirely from the tagged tree is not
-the cluster that was measured; it has not been run.
+the cluster that was measured. It was run once, on 26 November 2026, to check
+that it works, not how fast: see
+[what a first install looks like](../GSQ.md#what-a-first-install-looks-like).
 
 ## Provenance
 
