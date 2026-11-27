@@ -55,8 +55,10 @@ but short of memory can also serve as a cache of the experts in use, beside the
 nodes that hold slices. On my five computers this path wrote short replies at a
 median of 25.8 tokens per second ([how it was measured](docs/GSQ.md#measured-speed)).
 
-It is built from a checkout on an Apple Silicon head; the downloads below are
-still 0.3.0. Read [why and how](docs/GSQ.md) and
+It is installed from the source, on an Apple Silicon head: `bash install.sh head`
+there, then `bash install.sh node` on each of the other computers. The script
+finds what is missing, offers to install it and leads the rest step by step.
+The downloads below are still 0.3.0. Read [why and how](docs/GSQ.md#build-and-start) and
 [what changed in 0.7.0](docs/releases/0.7.0.md).
 
 ## Will it work on your machines?
