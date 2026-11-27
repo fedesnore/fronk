@@ -93,8 +93,9 @@ A few consequences of this division:
 - **Requests can travel quantized.** The IQ kernels take their input as Q8_K. The
   head can quantize each activation once and send that form: 2,920 bytes instead
   of 5,120 as FP16, 3,112 per token with the routing record and headers. Replies
-  stay FP16. This is opt-in (a file named `wire-q8k` in the head's state
-  directory), and the head refuses it unless every node confirms it.
+  stay FP16. A file named `wire-q8k` in the head's state directory turns this
+  on (the installer creates it for this engine), and the head refuses to start
+  with it unless every node confirms it.
 - **Drafts stay on the head.** MTP drafts come from a small separate GGUF, loaded
   as a draft model on the GPU; its experts never go to the cluster. Every drafted
   token is verified by the full model in the same pass, and by default only the
@@ -154,8 +155,123 @@ overwrites verified files. Timing profiles are stored per format.
 
 ## Build and start
 
-You need an Apple Silicon Mac for the head, with the Xcode command-line tools,
-CMake and network access for the first build. Nodes need what they needed before.
+### The short way
+
+Get the source on each computer (clone the repository, or download and unpack
+the archive of the 0.7.0 tag), then run one command in its folder. Start on the
+head:
+
+```sh
+bash install.sh head
+```
+
+and, when the head asks for a node, on that computer:
+
+```sh
+bash install.sh node
+```
+
+The script looks at the computer, lists the build tools that are missing and
+offers to install them, showing each command first: Apple's command line tools
+on a Mac, the compiler and Python through the package manager on Linux, CMake on
+the head (through Homebrew, or as a private copy when there is no Homebrew).
+Nothing is installed without a yes. `bash install.sh check` only reports.
+
+Then the installer manager takes over and leads the rest in order:
+
+1. **On the head** it builds the engine and Fronk, writes the engine's first
+   settings, asks how many nodes there will be and shows a pairing code.
+2. **On each node** it builds Fronk, asks for the node's name and the pairing
+   code, and starts the node service.
+3. **Back on the head** it checks that every node answers, then asks for the
+   model: files already on a disk, or a download of the two files (75.8 GB,
+   resumable). It verifies them and offers to build the draft model.
+4. **Start.** The head shows the real plan, with each machine's memory and
+   timings, and loads nothing until you choose to proceed.
+
+If something stops, the message says what is missing; run the same command
+again and it continues from what is already done.
+
+### What a first install looks like
+
+The whole path was run once on the author's five computers (26 November 2026):
+head and four nodes installed with `install.sh`, paired with the code passed
+from the head, units sent and verified, numerical self-test passed on all 20
+units, replies written through the API. Four things from that run are worth
+knowing before you start.
+
+- **On a Mac, start the programs yourself the first time.** macOS asks whether
+  Fronk may find devices on the local network, and only a program started from
+  the Terminal or as the installed service gets that question. A head or a node
+  started detached from a remote session is refused the network without a
+  message on screen: the head then sees nodes that never complete a path, and a
+  node's log says its replies were not sent.
+- **The model must fit in memory that is free now.** A node offers what is free
+  when the head connects, not what is installed: two Macs with applications
+  open offered two units each instead of three or four. The head fills the gap
+  with units of its own when it can, and that amount changed from one start to
+  the next. If the plan says `head-ssd covers the rest`, do not proceed: close
+  applications on the nodes and choose `m` to plan again.
+- **A head stopped at its plan leaves the engine running.** This is a defect,
+  seen three times and not fixed yet: the head exits, and the engine with its
+  supervisor stays, holding its memory. `pgrep -fl fronk-llama-server` shows
+  it; `pkill -f fronk_engine.py` and `pkill fronk-llama-server` end both.
+- **With the engine's built-in defaults it is correct but slow.** That run used
+  them and wrote 2 to 5 tokens per second, where the author's tuned cluster
+  writes [25.8](#measured-speed). The installer now sets the engine up
+  differently; the next section says how and why.
+
+### The engine's first settings
+
+The slow run was not slow because of the nodes. Each node computed its share of
+a layer in 0.5 to 1.6 ms. The head was the busy one: it held three units itself,
+ran the engine on all ten performance cores and had 0.3 GB of memory free. Every
+reply then waited about 5 ms before the head added it up, whichever cable it
+came through, and one pass of the model over its 48 layers took about a second.
+On prose a pass also yielded only 2 or 3 tokens, because the full model rejected
+about half of the drafted ones.
+
+So the installer now writes eight settings on a new head, with the values the
+author's head uses. Each is a file of one line in the head's state directory.
+
+| File | What it sets | Engine default | Installer writes |
+|---|---|---|---|
+| `gsq-threads` | CPU threads of the engine. Its heavy work is on the GPU; more threads only take cores from the ones that add up the experts | all performance cores, 10 on an M4 Pro | `2` |
+| `gsq-draft` | The most tokens drafted ahead in one pass | `7` | `12` |
+| `gsq-draft-p-min` | A draft stops at a token less likely than this | `0.5` | `0.05` |
+| `gsq-draft-chain` | A draft also stops when the chance that all of it is kept falls below this | no such rule | `0.75` |
+| `gsq-copy-drafts` | The longest draft copied from text already in the chat, in tokens | `0`, off | `31` |
+| `ds4-ctx` | Context length in tokens | `65536` | `32768` |
+| `gsq-cache-ram-mb` | Memory for chats other than the current one | `3072` | `0` |
+| `gsq-ctx-checkpoints` | Points a chat can be rolled back to, about 112 MiB each | `16` | `4` |
+
+Three things to know about them:
+
+- **They do not change what the model writes.** A drafted token is kept only if
+  the full model would have written it. `gsq-lenience`, the one setting that
+  relaxes this, stays at 0.
+- **The last three trade comfort for memory**, and are written only on a head
+  with less than 32 GiB. The context is half as long, a chat you return to is
+  read again from its start, and there are fewer rollback points. A larger head
+  keeps the engine's defaults for them.
+- **They are written once.** The installer never replaces a file that is there
+  and does not put back one you removed: delete a file and the engine uses its
+  default again.
+
+One more thing the author's head does is left to you: `head-reserve-gb 24` in
+the head's `fronk.conf` keeps units off the head, so that its memory and cores
+go to the engine. It only works when the nodes can hold all 20 units.
+
+What these settings are worth on a fresh install has not been measured. A head
+installed this way starts its engine with them (checked on the M4 Pro), but on
+the day of that check the nodes at hand could hold only 11 of the 20 units, so
+nothing was generated. No setting has been timed alone either. Read the 25.8
+tokens per second as the figure of the author's cluster, not as what a first
+install gives.
+
+### By hand
+
+The same steps, for a contributor who wants to see each one.
 
 1. **Build the engine** on the head, in the checkout:
 
@@ -164,12 +280,13 @@ CMake and network access for the first build. Nodes need what they needed before
    ```
 
    This fetches llama.cpp at commit `cd959bae` (0.9.0), applies the patch and
-   builds `build/gsq-engine/fronk-llama-server` and a small GPU keepalive.
+   builds `build/gsq-engine/fronk-llama-server` and a small GPU keepalive. It
+   needs CMake and git. The installer runs it by itself when the engine is
+   not built yet.
 
 2. **Get the weights.** Put the two IQ3_XXS shards of the pinned revision in one
    folder; [MODEL.md](MODEL.md#the-3-bit-weights-for-the-llamacpp-head) gives
-   names, sizes and digests. Download them yourself: for this engine the
-   manager verifies local files and does not download.
+   names, sizes and digests. The manager can also download them.
 
 3. **Build the MTP file** next to that folder (optional, but without it the
    engine drafts from n-grams only, which is slower):
@@ -189,14 +306,21 @@ CMake and network access for the first build. Nodes need what they needed before
    bash tools/install/fronk-install.sh --role head --engine gsq
    ```
 
-   The choice is kept in the installed configuration. The rest of the workflow
-   is the one in the [installation guide](INSTALL.md): nodes, synthetic demo,
-   model selection, plan. Install the nodes from the same source, because the
-   head and the nodes must agree on the transport.
+   The choice is kept in the installed configuration. Install the nodes from
+   the same source, because the head and the nodes must agree on the
+   transport.
+
+For this engine the manager does not run the synthetic demo of the
+[installation guide](INSTALL.md): that trial builds and times units of the Q4
+format, 3.35 GB each. The fit and the timings come from the real plan at the
+first start. On a GSQ head requests travel as Q8_K by default (the file
+`wire-q8k` in its state directory); delete the file to go back to FP16.
 
 Engine settings are one-line files in the head's state directory; remove a file
 to return to its default. The header of
-[run.sh](../tools/engine/gsq/run.sh) lists all of them. The ones used most:
+[run.sh](../tools/engine/gsq/run.sh) lists all of them. The installer writes
+eight of them at the first install ([which and why](#the-engines-first-settings));
+this table gives the engine's own defaults for the ones used most:
 
 | File | Meaning | Default |
 |---|---|---|

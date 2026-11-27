@@ -10,6 +10,25 @@ is experimental. Both use the same commands. Read
 and `tools/install/fronk-install.sh`, `onboard.sh`, `service.sh`, `model.conf`.
 For a new physical cluster, start with [NETWORK.md](NETWORK.md) in this directory.
 
+From a source checkout there is also `install.sh` at the top: `bash install.sh
+check` reports what a computer has and lacks without changing anything,
+`bash install.sh head` and `bash install.sh node` install the llama.cpp head
+(Apple Silicon, 3-bit weights, [GSQ.md](../GSQ.md)) and its nodes. It asks before
+installing any build tool and then calls the same manager with `--engine gsq`,
+`--backend auto` and `--no-measure`. Without a terminal it needs `--yes`, and
+then it stops at anything missing instead of installing it, unless
+`--install-tools` is given. A package installation on Linux needs the person's
+password: do not try to supply or bypass it.
+
+On a new llama.cpp head the manager also writes the engine's first settings,
+through `tools/install/gsq-head-settings.sh`: `gsq-threads`, `gsq-draft`,
+`gsq-draft-p-min`, `gsq-draft-chain`, `gsq-copy-drafts`, and under 32 GiB of
+memory `ds4-ctx`, `gsq-cache-ram-mb`, `gsq-ctx-checkpoints`. They are one-line
+files in the state directory, written once (`gsq-settings.installed` records
+which) and never over an existing file. Do not rewrite a file the person
+changed or removed. [GSQ.md](../GSQ.md#the-engines-first-settings) has the
+values, what each one does and what has not been measured.
+
 ## Inspect before acting
 
 Determine which computer you are on, its intended role, installation prefix,
