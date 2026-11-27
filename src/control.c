@@ -2,6 +2,7 @@
  * Extracted from fronk-cli so the head and CLI enforce identical framing,
  * authentication and timeout rules. Caller-provided buffers avoid allocation.
  */
+#include <pthread.h>
 #include "control.h"
 #include "net.h"
 #include "auth.h"
@@ -18,8 +19,8 @@ static int wait_until(int fd, int writing, int64_t deadline) {
     if (!rc) errno=ETIMEDOUT;
     return rc==1?0:-1;
 }
-const char *control_exchange(int fd, const char *request, size_t len, char response[RESP_MAX_MESSAGE],
-                            resp_value *values, int64_t deadline) {
+static const char *exchange_once(int fd, const char *request, size_t len, char response[RESP_MAX_MESSAGE],
+                                 resp_value *values, int64_t deadline) {
     size_t sent=0, received=0;
     const char *error;
     while (sent<len) {
@@ -48,6 +49,16 @@ failed:
     /* A failed transport must not look like a server error left over from a
      * previous exchange, or expose a partially parsed response to diagnostics. */
     values[0]=(resp_value){0};
+    return error;
+}
+/* One exchange at a time in this process: the head's cache policy thread
+ * (hot.c) and its main thread use the same control connections. */
+const char *control_exchange(int fd, const char *request, size_t len, char response[RESP_MAX_MESSAGE],
+                            resp_value *values, int64_t deadline) {
+    static pthread_mutex_t one=PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&one);
+    const char *error=exchange_once(fd,request,len,response,values,deadline);
+    pthread_mutex_unlock(&one);
     return error;
 }
 const char *control_authenticate(int fd, const char *password, char response[RESP_MAX_MESSAGE],

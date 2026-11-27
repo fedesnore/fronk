@@ -67,6 +67,12 @@ typedef struct fr_backend {
 } fr_backend;
 
 extern const fr_backend fr_ref, fr_ref_q8;
+#ifdef FR_GSQ_COMPUTE
+extern const fr_backend fr_gsq;  /* backends/gsq.c: GSQ units (layout.h) */
+/* Internal transport entry: native Q8_K bytes validated by the wire decoder. */
+int fr_gsq_run_quantized(const fr_req *req,const void *xq,fr_part *out);
+int fr_gsq_backend_close(void);  /* stops its pool; refuses while units are borrowed */
+#endif
 #ifdef FR_USER_BACKEND
 extern const fr_backend fr_user; /* backends/user.c; its name is its own */
 #endif

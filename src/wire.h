@@ -6,6 +6,11 @@
 #ifndef FR_WIRE_H
 #define FR_WIRE_H
 #include "backend.h"
+/* Optional type 5 requests: canonical big-endian Q8_K scales/sums, raw int8
+ * values. Four logical ranges (3,3,2,2 blocks) preserve completion bitmaps. */
+#define FR_Q8_BLOCK_BYTES 292
+#define FR_Q8_TOKEN_BYTES (10*FR_Q8_BLOCK_BYTES)
+#define FR_Q8_RANGE_MAX (3*FR_Q8_BLOCK_BYTES)
 #define FR_WIRE_HEADER 24
 #define FR_RANGE_HEADER 8
 #define FR_FRAGMENT_DIMS 640
@@ -27,10 +32,13 @@ size_t fr_req_encode(unsigned char *out,size_t capacity,const fr_req *req,
 typedef struct {
     uint32_t session,step;
     unsigned type,node,burst,layer,fragment,token,start;
-    float values[FR_FRAGMENT_DIMS];
+    union { float values[FR_FRAGMENT_DIMS]; unsigned char q8[FR_Q8_RANGE_MAX]; };
     uint16_t expert[FR_ACTIVE_ROUTED];
     float gate[FR_ACTIVE_EXPERTS];
 } fr_fragment;
+size_t fr_req_q8_encode(unsigned char *out,size_t capacity,const fr_req *req,
+                       const unsigned char xq[FR_MAX_BURST][FR_Q8_TOKEN_BYTES],
+                       uint32_t session,uint32_t step,unsigned fragment);
 /* Finite IEEE binary16, round-to-nearest/ties-to-even. Overflow is an error. */
 int fr_half(float value,uint16_t *out);
 float fr_unhalf(uint16_t value);

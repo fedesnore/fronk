@@ -12,6 +12,7 @@
  * The cleanup path detaches serving and joins workers before unloading weights.
  * Read PROJECT.md for the design and docs/llm/DEBUG.md for failure diagnosis.
  */
+#include "layout.h"
 #include "head.h"
 #ifdef FR_AVX2_COMPUTE
 #include "avx2.h"
@@ -24,6 +25,9 @@
 #include "prep.h"
 #include "units.h"
 #include "serve.h"
+#include "hot.h"
+#include "interfaces.h"
+#include <limits.h>
 #include <errno.h>
 #include <math.h>
 #include <pthread.h>
@@ -54,6 +58,31 @@ static int require_ranked(const fr_connection *links,const fr_backend *local,uin
         }
     }
     return 0;
+#endif
+}
+
+/* Opt-in transport. An old or non-GSQ node must fail negotiation, never time
+ * out while silently treating Q8_K bytes as FP16 activations. */
+static int enable_q8k(fr_head_plane *plane,const fr_backend *local,const char *state_dir) {
+    char path[512];snprintf(path,sizeof(path),"%s/wire-q8k",state_dir);
+    FILE *flag=fopen(path,"r");
+    const char *env=getenv("FRONK_WIRE_Q8K");
+    int enabled=flag!=NULL || (env && !strcmp(env,"1"));
+    if(flag) fclose(flag);
+    if(!enabled) return 0;
+#ifndef FR_GSQ_COMPUTE
+    (void)plane;(void)local;return -1;
+#else
+    if(local && local!=&fr_gsq) return -1;
+    for(unsigned i=0;i<plane->links->count;++i) if(plane->active&(1u<<i)) {
+        char reply[RESP_MAX_MESSAGE];resp_value values[RESP_MAX_VALUES];
+        if(control_exchange(plane->links->links[i].fd,"WIRE-Q8K\r\n",10,reply,values,net_now_ns()/1000000+3000) ||
+           values[0].type!=RESP_STRING || values[0].len!=6 || memcmp(values[0].data,"q8k-v1",6)) {
+            fprintf(stderr,"fronk: %s does not confirm q8k-v1 transport; refusing Q8_K\n",plane->links->links[i].identity.name);
+            return -1;
+        }
+    }
+    plane->q8_k=plane->q8_capable=1;printf("TRANSPORT q8k-v1: 3112 request bytes/token; FP16 replies unchanged\n");return 0;
 #endif
 }
 
@@ -123,6 +152,34 @@ int head_shares(const fr_selection *curves,const double *net_ns,unsigned count,u
     }
     *ssd=FR_BLOCKS-total; return 0;
 }
+static int local_admit(void *ctx,unsigned layer,unsigned expert) { (void)ctx; return fr_hot_admit(layer,expert); }
+static int local_evict(void *ctx,unsigned layer,unsigned expert) { (void)ctx; return fr_hot_evict(layer,expert); }
+/* hot.c's policy asks the cache node to copy one expert in: 0 done, 1 its budget is full. */
+static int cache_admit(void *ctx,unsigned layer,unsigned expert) {
+    const fr_link *link=ctx; char text[48],reply[RESP_MAX_MESSAGE]; resp_value v[RESP_MAX_VALUES];
+    int n=snprintf(text,sizeof(text),"HOT %u %u\r\n",layer,expert);
+    if (control_exchange(link->fd,text,(size_t)n,reply,v,net_now_ns()/1000000+30000)) return -1;
+    if (v[0].type!=RESP_ERROR) return 0;
+    return v[0].len>=4 && !memcmp(v[0].data,"FULL",4)?1:-1;
+}
+/* ... and to give one back: its memory is full and another expert is used more. */
+static int cache_evict(void *ctx,unsigned layer,unsigned expert) {
+    const fr_link *link=ctx; char text[48],reply[RESP_MAX_MESSAGE]; resp_value v[RESP_MAX_VALUES];
+    int n=snprintf(text,sizeof(text),"COLD %u %u\r\n",layer,expert);
+    if (control_exchange(link->fd,text,(size_t)n,reply,v,net_now_ns()/1000000+30000)) return -1;
+    return v[0].type==RESP_ERROR?-1:0;
+}
+static int head_selftest(fr_head_plane *h,const fr_gguf *g,FILE *out,uint32_t base);
+/* A cache gives the self-test's experts back and takes them again; the same oracle
+ * then checks what it reloaded. An older fronk on a node cannot: it keeps what it loads. */
+static int cache_gives_back(fr_head_plane *h,const fr_gguf *g,unsigned cache,uint32_t base) {
+    int refused=0;
+    for (unsigned t=0;t<2;++t) for (unsigned j=0;j<FR_ACTIVE_ROUTED;++j) refused|=fr_hot_policy_evict(7,(t*97+j*53+11)%FR_ROUTED_EXPERTS);
+    if (refused) { puts("HOT cache keeps what it loads: this node cannot give experts back (an older fronk on it?)"); return 0; }
+    for (unsigned t=0;t<2;++t) for (unsigned j=0;j<FR_ACTIVE_ROUTED;++j) if (fr_hot_policy_admit(cache,7,(t*97+j*53+11)%FR_ROUTED_EXPERTS)) return -1;
+    fputs("HOT reloaded ",stdout);
+    return head_selftest(h,g,stdout,base);
+}
 static int exchange(int fd,const char *text,char *reply,resp_value *v,int ms) {
     const char *e=control_exchange(fd,text,strlen(text),reply,v,net_now_ns()/1000000+ms);
     if (e) fprintf(stderr,"fronk: %s\n",e);
@@ -171,7 +228,12 @@ static void *push_units(void *arg) {
     push *p=arg; char reply[RESP_MAX_MESSAGE],text[100]; resp_value v[RESP_MAX_VALUES]={0}; int64_t start=net_now_ns();
     for (unsigned b=0;!p->rc && b<FR_BLOCKS;++b) if (p->mask>>b&1) {
         snprintf(text,sizeof(text),"RECV %u %s\r\n",b,p->hex[b]);
-        if (exchange(p->fd,text,reply,v,10000) || fr_unit_stream(p->g,b,socket_sink,p) ||
+        /* EXISTS: the node already holds this unit and verified its SHA-256 itself. */
+        const int asked=exchange(p->fd,text,reply,v,120000);
+        if (!asked && v[0].type==RESP_STRING && v[0].len==6 && !memcmp(v[0].data,"EXISTS",6)) {
+            printf("FRONK unit %02u on %s already present, verified there\n",b,p->name); fflush(stdout); continue;
+        }
+        if (asked || v[0].type!=RESP_STRING || fr_unit_stream(p->g,b,socket_sink,p) ||
             control_exchange(p->fd,"",0,reply,v,net_now_ns()/1000000+120000) || v[0].type==RESP_ERROR) {
             p->rc=-1;
             if (v[0].type==RESP_ERROR) snprintf(p->error,sizeof(p->error),"%.*s",(int)(v[0].len<199?v[0].len:199),v[0].data);
@@ -182,8 +244,22 @@ static void *push_units(void *arg) {
     p->seconds=(net_now_ns()-start)/1e9; return NULL;
 }
 /* Scalar oracle straight from GGUF bytes: the whole MoE for one token. */
+/* GSQ: every unit's slice of every routed expert, from the GGUF, through gsq.c's
+ * scalar oracle (ggml's reference dequantizers, double accumulation). */
+static int oracle_gsq(const fr_gguf *g,const fr_req *r,unsigned t,float *y) {
+    static unsigned char slice[1u<<20]; static double acc[FR_HIDDEN];
+    if (fr_gsq_slice_bytes(r->layer)>sizeof(slice)) return -1;
+    memset(acc,0,sizeof(acc));
+    for (unsigned j=0;j<FR_ACTIVE_ROUTED;++j) for (unsigned b=0;b<FR_BLOCKS;++b) {
+        if (fr_gsq_slice(&g->gsq,b,r->layer,r->expert[t][j],slice) ||
+            fr_gsq_ref_slice(r->layer,slice,r->x[t],r->gate[t][j],acc)) return -1;
+    }
+    for (unsigned d=0;d<FR_HIDDEN;++d) y[d]=(float)acc[d];
+    return 0;
+}
 static int oracle(const fr_gguf *g,const fr_req *r,unsigned t,float *y) {
     static float h[FR_INTERMEDIATE]; double sum;
+    if (g->layout==FR_LAYOUT_GSQ) return oracle_gsq(g,r,t,y);
     memset(y,0,FR_HIDDEN*sizeof(float));
     for (unsigned j=0;j<FR_ACTIVE_EXPERTS;++j) {
         unsigned shared=j==FR_ACTIVE_ROUTED,e=shared?0:r->expert[t][j],type=shared?FR_Q8_0:FR_Q4_K,down=shared?FR_Q8_0:FR_MXFP4;
@@ -200,19 +276,22 @@ static int oracle(const fr_gguf *g,const fr_req *r,unsigned t,float *y) {
     }
     return 0;
 }
-static int head_selftest(fr_head_plane *h,const fr_gguf *g,FILE *out) {
+/* base: steps already used on this session. A node drops a step lower than one it
+ * has seen, so the start-up tests run with rising bases: 0, 100, 200, 300. */
+static int head_selftest(fr_head_plane *h,const fr_gguf *g,FILE *out,uint32_t base) {
     static fr_req req; static fr_part got; static float want[FR_HIDDEN]; double worst=0;
     req.layer=7; req.burst=2;
     for (unsigned t=0;t<2;++t) {
         for (unsigned j=0;j<FR_ACTIVE_ROUTED;++j) req.expert[t][j]=(uint16_t)((t*97+j*53+11)%FR_ROUTED_EXPERTS);
-        for (unsigned j=0;j<FR_ACTIVE_EXPERTS;++j) req.gate[t][j]=j==FR_ACTIVE_ROUTED?.7f:.1f;
+        /* GSQ units hold no shared expert: the head's engine computes it (gate 0). */
+        for (unsigned j=0;j<FR_ACTIVE_EXPERTS;++j) req.gate[t][j]=j==FR_ACTIVE_ROUTED?(g->layout==FR_LAYOUT_GSQ?0.f:.7f):.1f;
         for (unsigned d=0;d<FR_HIDDEN;++d) { uint16_t half; fr_half(sinf((float)(d*7+t*13))*.5f,&half); req.x[t][d]=fr_unhalf(half); }
     }
     /* Warm-up: one call per layer touches every node's units and Metal buffers
      * once, without a deadline; cold, the M1 Pro missed ~150 deadlines in the test pass. */
     for (unsigned layer=0;layer<FR_LAYERS;++layer) {
         req.layer=layer;
-        if (fr_head_plane_run(h,&req,1+layer,60000000000ull,&got) || h->last_missing) {
+        if (fr_head_plane_run(h,&req,base+1+layer,60000000000ull,&got) || h->last_missing) {
             fprintf(out,"SELFTEST warm-up failed at layer %u; check compute and replies on",layer);
             for (unsigned n=0;n<h->links->count;++n) if (h->last_missing>>n&1) fprintf(out," %s",h->links->links[n].identity.name);
             fputc('\n',out); return -1;
@@ -220,7 +299,7 @@ static int head_selftest(fr_head_plane *h,const fr_gguf *g,FILE *out) {
     }
     req.layer=7;
     for (unsigned attempt=1;;++attempt) {
-        int rc=fr_head_plane_run(h,&req,FR_LAYERS+attempt,5000000000ull,&got);
+        int rc=fr_head_plane_run(h,&req,base+FR_LAYERS+attempt,5000000000ull,&got);
         if (!rc && !h->last_missing) break;
         fprintf(out,"SELFTEST %s %u: no answer from",attempt<3?"retry":"failed after",attempt);
         for (unsigned n=0;n<h->links->count;++n) if (h->last_missing>>n&1) fprintf(out," %s",h->links->links[n].identity.name);
@@ -242,6 +321,37 @@ static char ask(const char *prompt) {
     for (int d=c;d!='\n' && d!=EOF;d=getchar()) {}
     return c==EOF?'q':(char)c;
 }
+/* A full-width call whose tokens all route to the same ten experts: every expert
+ * serves FR_MAX_BURST tokens at once, the case prompt reading produces for its most
+ * used experts. The two-token test above cannot see a kernel that mishandles it. */
+static int head_selftest_wide(fr_head_plane *h,const fr_gguf *g,FILE *out,uint32_t base) {
+    static fr_req req; static fr_part got; static float want[FR_HIDDEN]; double worst=0;
+    req.layer=7; req.burst=FR_MAX_BURST;
+    for (unsigned t=0;t<FR_MAX_BURST;++t) {
+        for (unsigned j=0;j<FR_ACTIVE_ROUTED;++j) req.expert[t][j]=(uint16_t)((j*53+11)%FR_ROUTED_EXPERTS);
+        for (unsigned j=0;j<FR_ACTIVE_EXPERTS;++j) req.gate[t][j]=j==FR_ACTIVE_ROUTED?(g->layout==FR_LAYOUT_GSQ?0.f:.7f):.1f;
+        for (unsigned d=0;d<FR_HIDDEN;++d) { uint16_t half; fr_half(sinf((float)(d*7+t*13))*.5f,&half); req.x[t][d]=fr_unhalf(half); }
+    }
+    if (fr_head_plane_run(h,&req,base+1,60000000000ull,&got) || h->last_missing) { fputs("SELFTEST wide: no complete answer\n",out); return -1; }
+    static const unsigned check[]={0,FR_MAX_BURST/2,FR_MAX_BURST-1};
+    for (unsigned k=0;k<3;++k) {
+        const unsigned t=check[k]; fr_error e;
+        if (oracle(g,&req,t,want) || fr_compare(want,got.y[t],FR_HIDDEN,&e) || !fr_conforms(&e,&fr_backend_tolerance)) {
+            fprintf(out,"SELFTEST wide mismatch: %u tokens on the same experts, token %u relative_l2=%.3g (a node drops or miscomputes shared experts)\n",(unsigned)FR_MAX_BURST,t,e.relative_l2); return -1; }
+        if (e.relative_l2>worst) worst=e.relative_l2;
+    }
+    fprintf(out,"SELFTEST wide: %u tokens on the same experts vs GGUF scalar oracle: relative_l2=%.3g pass\n",(unsigned)FR_MAX_BURST,worst); return 0;
+}
+/* One call routed to a cache node (the self-test's layer-7 experts, admitted by
+ * the caller), with a short deadline: does its reply arrive at all? */
+static int cache_answers(fr_head_plane *h,uint32_t step) {
+    static fr_req req; static fr_part got;
+    req.layer=7; req.burst=1;
+    for (unsigned j=0;j<FR_ACTIVE_ROUTED;++j) req.expert[0][j]=(uint16_t)((j*53+11)%FR_ROUTED_EXPERTS);
+    for (unsigned j=0;j<FR_ACTIVE_EXPERTS;++j) req.gate[0][j]=j==FR_ACTIVE_ROUTED?0.f:.1f;
+    for (unsigned d=0;d<FR_HIDDEN;++d) { uint16_t half; fr_half(sinf((float)(d*7))*.5f,&half); req.x[0][d]=fr_unhalf(half); }
+    return !fr_head_plane_run(h,&req,step,3000000000ull,&got) && !h->last_missing;
+}
 typedef struct {
     fr_connection *links; fr_discovery d; fr_plan plan; fr_head_plane *plane; fr_units local;
     const fr_backend *backend; int sessions,plane_open;
@@ -249,7 +359,9 @@ typedef struct {
 static void teardown(cycle *c) {
     char reply[RESP_MAX_MESSAGE]; resp_value v[RESP_MAX_VALUES];
     fr_serve_detach();
+    fr_hot_policy_stop();   /* before the cache node's session ends */
     if (c->plane_open) fr_head_plane_close(c->plane);
+    fr_hot_close();   /* the local cache, if this Mac was one */
     c->plane_open=0;
     for (unsigned i=0;c->sessions && c->links && i<c->links->count;++i) (void)exchange(c->links->links[i].fd,"SESSION STOP\r\n",reply,v,10000);
     c->sessions=0; fr_units_close(&c->local);
@@ -347,7 +459,7 @@ static int run_cycle(const fr_config *cfg,const fr_gguf *g,char hex[FR_BLOCKS][6
     uint64_t total=head.total,usable=head.cap; unsigned capacity=p->p[p->count-1].cap;
     for (unsigned i=0;i+1<p->count;++i) { total+=c->d.nodes[p->p[i].node].total; usable+=c->d.nodes[p->p[i].node].cap; capacity+=p->p[i].cap; }
     printf("\nPLAN nodes=%u RAM total=%.1f GB usable=%.1f GB weights=%.1f GB (%u units of %.2f GB)\n",p->count,total/GB,usable/GB,
-           FR_BLOCKS*(double)FR_NATIVE_BLOCK_BYTES/GB,FR_BLOCKS,FR_NATIVE_BLOCK_BYTES/GB);
+           FR_BLOCKS*(double)(double)fr_unit_bytes()/GB,FR_BLOCKS,(double)fr_unit_bytes()/GB);
     for (unsigned i=0;i<p->count;++i) {
         char r[160]; ranges(p->p[i].mask,r,sizeof(r));
         const char *name="head",*link="local",*via=""; unsigned node=p->p[i].node;
@@ -355,7 +467,7 @@ static int run_cycle(const fr_config *cfg,const fr_gguf *g,char hex[FR_BLOCKS][6
             name=c->links->links[l].identity.name; link=interface_type(c->links->links[l].via.type); via=c->links->links[l].via.name; }
         int best=selection_pick(&curves[i],p->p[i].share?p->p[i].share:1);
         printf("  %-10s link=%-11s %-7s neurons %-22s blocks=%2u cap=%2u %.1f GB backend=%s cached=%u net=%.0f us%s\n",name,link,via,r,p->p[i].share,p->p[i].cap,
-               p->p[i].share*(double)FR_NATIVE_BLOCK_BYTES/GB,best>=0?curves[i].candidate[best].name:"-",(unsigned)__builtin_popcount(p->p[i].mask&p->p[i].cached),net[i]/1e3,netsrc[i]=='m'?" (measured)":netsrc[i]=='p'?" (probe)":"");
+               p->p[i].share*(double)(double)fr_unit_bytes()/GB,best>=0?curves[i].candidate[best].name:"-",(unsigned)__builtin_popcount(p->p[i].mask&p->p[i].cached),net[i]/1e3,netsrc[i]=='m'?" (measured)":netsrc[i]=='p'?" (probe)":"");
         if (p->p[i].paged) {
             const fr_candidate *candidate=&curves[i].candidate[best]; unsigned n=(unsigned)__builtin_popcount(p->p[i].paged);
             printf("  HYBRID node=%s RAM=%u SSD=%u cache=%.0f MiB burst=%u compute+cold_io=%.0f us warm=%.0f us network=%.0f us predicted_reply=%.0f us ssd_mask=%u (saved calibration)\n",name,
@@ -367,7 +479,7 @@ static int run_cycle(const fr_config *cfg,const fr_gguf *g,char hex[FR_BLOCKS][6
         char r[160]; ranges(p->ssd,r,sizeof(r));
         double rate=p->cache_read_bps=fr_cache_read_rate(cfg->state_dir);
         printf("  %-10s link=%-11s %-7s neurons %-22s blocks=%2u", "head-ssd","ssd","",r,ssd);
-        if (rate>0) printf(" SSD %.2f GB/s uncached -> ~%.0f us/barrier at burst 1",rate/1e9,ssd*(double)FR_ACTIVE_ROUTED*FR_NATIVE_SLICE_BYTES/rate*1e6);
+        if (rate>0) printf(" SSD %.2f GB/s uncached -> ~%.0f us/barrier at burst 1",rate/1e9,ssd*(double)FR_ACTIVE_ROUTED*(double)fr_slice_bytes_mean()/rate*1e6);
         puts(demo_passes?" (paging omitted from synthetic timing)":" (mmap, read-only)");
     }
     if (hybrid_blocks) printf("CAPACITY resident=%u/20 blocks — hybrid SSD=%u/20 planned=%u/20%s\n",FR_BLOCKS-hybrid_blocks-ssd,hybrid_blocks,FR_BLOCKS-ssd,ssd?"; legacy head-ssd covers the rest":" — fits");
@@ -390,7 +502,7 @@ static int run_cycle(const fr_config *cfg,const fr_gguf *g,char hex[FR_BLOCKS][6
     uint32_t local=p->p[p->count-1].mask|(demo_passes?0:p->ssd);
     for (unsigned b=0;!demo_passes && b<FR_BLOCKS;++b) if (local>>b&1) {
         printf("FRONK preparing local unit %02u (cached units are reused)\n",b);
-        if (fr_unit_write(g,b,cfg->state_dir,hex[b])) { fprintf(stderr,"fronk: cannot write head unit %u\n",b); failed=1; break; }
+        if (fr_unit_write(g,b,fr_layout_dir(cfg->state_dir),hex[b])) { fprintf(stderr,"fronk: cannot write head unit %u\n",b); failed=1; break; }
     }
     for (unsigned i=0;i<started;++i) {
         pthread_join(threads[i],NULL); if (jobs[i].rc) { fprintf(stderr,"fronk: sending units to %s failed: %s\n",jobs[i].name,jobs[i].error); failed=1; }
@@ -427,7 +539,7 @@ static int run_cycle(const fr_config *cfg,const fr_gguf *g,char hex[FR_BLOCKS][6
         }
     int64_t t_local=net_now_ns(); /* this Mac loads its units while the nodes load theirs */
     int local_rc=local && (demo_passes?fr_units_synthetic_cache(&c->local,c->backend,local,local_paged,local_cache,cfg->state_dir):
-                          fr_units_open_cache(&c->local,c->backend,cfg->state_dir,local,local_paged,local_cache));
+                          fr_units_open_cache(&c->local,c->backend,fr_layout_dir(cfg->state_dir),local,local_paged,local_cache));
     if (local && !local_rc) printf("FRONK this Mac: %u units ready in %.1f s\n",local_blocks,(net_now_ns()-t_local)/1e9);
     else if (local) fprintf(stderr,"fronk: this Mac could not load its %u units\n",local_blocks);
     int started_rc=0;
@@ -442,10 +554,92 @@ static int run_cycle(const fr_config *cfg,const fr_gguf *g,char hex[FR_BLOCKS][6
     c->plane_open=1; c->plane->active=0;
     for (unsigned i=0;i<p->count;++i) if (p->p[i].node!=FR_PLAN_HEAD && p->p[i].mask)
         for (unsigned l=0;l<c->links->count;++l) if (c->links->links[l].identity.id==c->d.nodes[p->p[i].node].id) c->plane->active|=1u<<l;
-    if (require_ranked(c->links,local?c->backend:NULL,c->plane->active)) return fail(__LINE__);
+    if (require_ranked(c->links,local?c->backend:NULL,c->plane->active) ||
+        enable_q8k(c->plane,local?c->backend:NULL,cfg->state_dir)) return fail(__LINE__);
     printf("TIMING FRONK %.1f s (units in place, sessions started)\n",(net_now_ns()-t0)/1e9); t0=net_now_ns();
     if (demo_passes) return fr_serve_demo(cfg,c->links,&c->plan,c->plane,demo_passes)?fail(__LINE__):0;
-    if (head_selftest(c->plane,g,stdout)) return fail(__LINE__);
+    /* One request socket per node: a reply that does not arrive whole is asked again
+     * from that node alone, within milliseconds (plane.c). */
+    if (c->links->count && fr_head_plane_unicast(c->plane)) return fail(__LINE__);
+    { char profile[PATH_MAX+16]; snprintf(profile,sizeof(profile),"%s/path-profile",cfg->state_dir);   /* per-call timings in the log (plane.h) */
+      FILE *on=fopen(profile,"r");
+      if (on) { fclose(on); c->plane->profile=1; fputs("PROFILE per-call timings every 480 calls (state file path-profile)\n",stdout); } }
+    /* Two nodes that send large replies together overrun this Mac's Ethernet adapter
+     * (a USB adapter stays deaf for about half a second). On an interface shared by
+     * several wired nodes, every node but the first keeps its large replies until
+     * asked (control PACE, plane.c): they compute together and answer in turn. */
+    for (unsigned i=0;i<c->plane->fanout.count;++i) {
+        uint32_t members=c->plane->fanout.groups[i].members&c->plane->active;
+        if (!interface_multicast_wanted(c->plane->fanout.groups[i].via.type,(unsigned)__builtin_popcount(members))) continue;
+        members&=members-1;   /* all but the first */
+        for (unsigned l=0;l<c->links->count;++l) if (members>>l&1) {
+            char reply[RESP_MAX_MESSAGE]; resp_value v[RESP_MAX_VALUES];
+            if (!exchange(c->links->links[l].fd,"PACE\r\n",reply,v,5000)) {
+                c->plane->paced|=1u<<l;
+                printf("TRANSPORT %s sends its large replies in turn on %s\n",c->links->links[l].identity.name,c->plane->fanout.groups[i].via.name);
+            }
+        }
+    }
+    if (head_selftest(c->plane,g,stdout,0)) return fail(__LINE__);
+    if (g->layout==FR_LAYOUT_GSQ && head_selftest_wide(c->plane,g,stdout,100)) return fail(__LINE__);
+    /* state-dir/cache-node, one line "NAME GB [SHARE]" per cache (hot.h). NAME is this
+     * head (its own RAM, no network) or a node that holds no unit; it keeps up to GB of
+     * whole hot experts. SHARE sizes its catalogue against the others' (default: GB):
+     * a cache limited by its speed rather than its memory takes a smaller part of the
+     * model. The same self-test then runs with its layer-7 experts in each cache in
+     * turn, against the same oracle. */
+    { char path[PATH_MAX+16],text[160],name[64],size[32]; double gb=0,most=0,share=0; int started=0; snprintf(path,sizeof(path),"%s/cache-node",cfg->state_dir);
+      FILE *f=fopen(path,"r");
+      for (unsigned line=0;f && line<FR_HOT_CACHES && fgets(text,sizeof(text),f);++line) {
+          int link=-1,k=-1; share=0;
+          const int fields=sscanf(text,"%63s %31s %lf",name,size,&share);   /* GB, or LEAST-MOST for a cache that follows this Mac's spare memory */
+          most=0;
+          if (fields<2 || sscanf(size,"%lf-%lf",&gb,&most)<1 || !(gb>0) || gb>512 || most>512) continue;
+          if (most<gb) most=gb;
+          if (fields<3 || !(share>0)) share=most;
+          const int here=!strcmp(name,cfg->name);   /* this Mac is the cache: its experts need no network */
+          for (unsigned l=0;l<c->links->count;++l) if (!strcmp(c->links->links[l].identity.name,name)) link=(int)l;
+          if (g->layout!=FR_LAYOUT_GSQ) { puts("HOT cache off: only the GSQ layout has one"); break; }
+          if (here && local) { puts("HOT cache off: this Mac holds units of its own (head-blocks)"); continue; }
+          if (!here && link<0) { printf("HOT cache off: node %s is not linked\n",name); continue; }
+          if (!here && (c->plane->active>>link&1)) { printf("HOT cache off: %s holds units; give it none (node-weight-limit-gb 0.5 in its configuration)\n",name); continue; }
+          if (!started && fr_hot_policy_start(cfg->state_dir,&c->plane->runs_begun,&c->plane->runs_done)) return fail(__LINE__);
+          started=1;
+          if (here) {
+              char threads[PATH_MAX+16]; snprintf(threads,sizeof(threads),"%s/hot-threads",cfg->state_dir);   /* cores for the cache; default: the performance cores */
+              FILE *t=fopen(threads,"r"); if (t) { unsigned n=0; if (fscanf(t,"%u",&n)==1 && n && n<=32) { char text[8]; snprintf(text,sizeof(text),"%u",n); setenv("FRONK_GSQ_THREADS",text,1); } fclose(t); }
+              if (fr_hot_open(g,(uint64_t)(gb*1e9)) || (k=fr_head_plane_cache_local(c->plane))<0 ||
+                  fr_hot_policy_add(name,share,local_admit,local_evict,NULL,&c->plane->cache_calls[k],&c->plane->cache_last[k])!=k) return fail(__LINE__);
+              if (most>gb && fr_hot_policy_elastic((unsigned)k,(uint64_t)(gb*1e9),(uint64_t)(most*1e9))) return fail(__LINE__);
+          } else {
+              char text[96],reply[RESP_MAX_MESSAGE]; resp_value v[RESP_MAX_VALUES];
+              snprintf(text,sizeof(text),"SESSION CACHE %u %u %u 50000\r\n",c->links->session,(unsigned)(gb*1000),cfg->burst);
+              c->sessions=1;
+              if (exchange(c->links->links[link].fd,text,reply,v,120000)) { fprintf(stderr,"fronk: %s could not start its cache (model path in its configuration?)\n",name); return fail(__LINE__); }
+              if ((k=fr_head_plane_cache(c->plane,(unsigned)link))<0 ||
+                  fr_hot_policy_add(name,share,cache_admit,cache_evict,(void *)&c->links->links[link],&c->plane->cache_calls[k],&c->plane->cache_last[k])!=k) return fail(__LINE__);
+          }
+          const uint32_t base=150+250*(uint32_t)k;   /* each cache its own steps, all before serving starts (1000) */
+          for (unsigned t=0;t<2;++t) for (unsigned j=0;j<FR_ACTIVE_ROUTED;++j) if (fr_hot_policy_admit((unsigned)k,7,(t*97+j*53+11)%FR_ROUTED_EXPERTS)) return fail(__LINE__);
+          if (!here && !cache_answers(c->plane,base)) {
+              /* A cache only saves work: without it the slices compute its experts. */
+              fr_hot_policy_disable((unsigned)k);
+              printf("HOT cache off: %s takes experts but its replies do not arrive. On a Mac, accept Local Network for fronk on its screen "
+                     "(System Settings, Privacy & Security), then restart this head. The slice nodes compute everything meanwhile.\n",name);
+          } else {
+              if (here && most>gb) printf("HOT cache on: this Mac keeps %.1f to %.1f GB of whole experts in RAM, as much as its spare memory allows, copied from its model file; the slice nodes compute the others\nHOT ",gb,most);
+              else if (here) printf("HOT cache on: this Mac keeps up to %.1f GB of whole experts in RAM, copied from its model file; the slice nodes compute the others\nHOT ",gb);
+              else printf("HOT cache on: %s keeps up to %.1f GB of whole experts; the slice nodes compute the others\nHOT ",name,gb);
+              if (head_selftest(c->plane,g,stdout,base+50)) return fail(__LINE__);
+              fputs("HOT ",stdout); if (head_selftest_wide(c->plane,g,stdout,base+110)) return fail(__LINE__);
+              if (cache_gives_back(c->plane,g,(unsigned)k,base+120)) return fail(__LINE__);
+          }
+          /* The next cache is tested with the same experts: this one lets them go. */
+          for (unsigned t=0;t<2;++t) for (unsigned j=0;j<FR_ACTIVE_ROUTED;++j) (void)fr_hot_policy_evict(7,(t*97+j*53+11)%FR_ROUTED_EXPERTS);
+      }
+      if (f) fclose(f);
+      if (started && fr_hot_policy_go()) return fail(__LINE__);
+    }
     printf("TIMING SELFTEST %.1f s\n",(net_now_ns()-t0)/1e9);
     if (fr_serve_attach(c->plane,c->links,&c->plan)) return fail(__LINE__);
     return fr_serve_session(cfg,c->links,&c->plan,c->plane);
@@ -453,9 +647,10 @@ static int run_cycle(const fr_config *cfg,const fr_gguf *g,char hex[FR_BLOCKS][6
 int head_main(const fr_config *cfg) {
     fr_gguf g; static char hex[FR_BLOCKS][65];
     if (mkdir(cfg->state_dir,0700) && errno!=EEXIST) { perror("fronk: state-dir"); return 1; }
-    if (!cfg->model[0] || fr_gguf_open(cfg->model,&g)) { fprintf(stderr,"fronk: model %s is not a valid Q4 GGUF\n",cfg->model[0]?cfg->model:"(unset)"); return 1; }
+    if (!cfg->model[0] || fr_gguf_open(cfg->model,&g)) { fprintf(stderr,"fronk: model %s is neither the Q4 GGUF nor the GSQ-RCO IQ3_XXS shard\n",cfg->model[0]?cfg->model:"(unset)"); return 1; }
+    printf("FRONK model layout %s, %.2f GB per unit\n",fr_layout_name(g.layout),fr_unit_bytes()/1e9);
     puts("FRONK checking unit manifest (first run hashes all units once)"); fflush(stdout);
-    if (fr_manifest(&g,cfg->state_dir,hex)) { fr_gguf_close(&g); fputs("fronk: cannot build unit manifest\n",stderr); return 1; }
+    if (fr_manifest(&g,fr_layout_dir(cfg->state_dir),hex)) { fr_gguf_close(&g); fputs("fronk: cannot build unit manifest\n",stderr); return 1; }
     if (fr_serve_start(cfg)) { fr_gguf_close(&g); return 1; }
     cycle c; memset(&c,0,sizeof(c)); int rc;
     do { rc=run_cycle(cfg,&g,hex,&c); teardown(&c); if (rc<0) fputs("fronk: cycle failed; returning to CONNECTION on [m]\n",stderr); }

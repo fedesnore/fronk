@@ -3,6 +3,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include "../src/hot.h"
+/* No expert cache in this test: every expert belongs to the slices. hot.c, which
+ * owns this table, is not linked here. */
+_Atomic uint8_t fr_hot_owner[FR_LAYERS][FR_ROUTED_EXPERTS];
 static int slow_run(const fr_req *r,fr_part *p) {
     struct timespec delay={.tv_nsec=10000000}; nanosleep(&delay,NULL);
     memset(p,0,sizeof(*p)); p->layer=r->layer; p->burst=r->burst;
@@ -20,12 +24,26 @@ int main(void) {
         for (unsigned d=0;d<640;++d) f.values[d]=(float)(f.start+d);
         complete+=fr_assemble(&a,&f,&s);
     }
-    check(complete==1 && a.bitmap==UINT32_MAX && a.request.x[7][2559]==2559,"out-of-order burst eight REQ assembly");
+    fr_bits want; fr_bits_first(&want,32);
+    check(complete==1 && fr_bits_equal(&a.bitmap,&want) && a.request.x[7][2559]==2559,"out-of-order burst eight REQ assembly");
     check(!fr_assemble(&a,&f,&s) && atomic_load(&s.duplicates)==1,"duplicate REQ ignored");
     a.submitted=1; f.step=3;
     check(!fr_assemble(&a,&f,&s) && atomic_load(&s.late)==1,"old request cannot replace latest assembly");
     f.step=7; fr_assemble(&a,&f,&s);
-    check(atomic_load(&s.gaps)==2 && a.bitmap==1,"missing steps counted and bitmap reset");
+    fr_bits_first(&want,1);
+    check(atomic_load(&s.gaps)==2 && fr_bits_equal(&a.bitmap,&want),"missing steps counted and bitmap reset");
+    {   /* A full-width call spans every word of the fragment bitmap. */
+        fr_assembly wide={0}; fr_fragment g=f; g.step=9; g.burst=FR_MAX_BURST; int done=0;
+        for (int i=4*FR_MAX_BURST-1;i>=0;--i) {
+            g.fragment=(unsigned)i; g.token=g.fragment/4; g.start=g.fragment%4*640;
+            for (unsigned d=0;d<640;++d) g.values[d]=(float)(g.token*FR_HIDDEN+g.start+d);
+            done+=fr_assemble(&wide,&g,&s);
+            if (i==1) check(!done,"wide REQ incomplete until its last fragment");
+        }
+        fr_bits_first(&want,4*FR_MAX_BURST);
+        check(done==1 && fr_bits_equal(&wide.bitmap,&want) && wide.request.x[FR_MAX_BURST-1][2559]==(float)(FR_MAX_BURST*FR_HIDDEN-1),
+              "out-of-order full-width REQ assembly");
+    }
     fr_accumulator sum={0}; fr_accumulator_begin(&sum,1,4,47,8,2);
     f.type=2; f.step=4;
     for (unsigned node=0;node<2;++node) for (int i=31;i>=0;--i) {

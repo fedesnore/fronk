@@ -46,6 +46,10 @@ and propose the smallest explicit extension instead of silently abusing it.
   Skip shared work when its gate is zero; handle a nonzero shared gate correctly.
 - Native routed gate/up is Q4_K; down is MXFP4; shared weights are Q8_0. Decode
   exactly. Do not confuse the legacy Q4_0 oracle layout with production units.
+- A backend computes one unit format. GSQ units (`src/gsq.h`, backend
+  `backends/gsq.c`) have per-layer IQ types, no shared expert and calls of up to
+  32 tokens; a backend for them is a separate port with its own oracle
+  (`fr_gsq_ref_slice`), not a variant of a native one.
 - No allocation, I/O or thread creation in a resident `run`. Preallocate worker
   resources outside the timed path. Calls are externally serialized.
 - Success publishes a complete result with unused tokens zeroed; every error

@@ -1,6 +1,11 @@
 """fronk web console: run and configure the head from a browser.
 
     FRONK_SECRET=... python3 tools/fronk-web.py     # then open http://127.0.0.1:7730
+    python3 tools/fronk-web.py --listen 10.20.20.2 # also on one private cable address
+
+--listen ADDRESS also serves the console on that address: one private IPv4 of this
+machine (a direct cable to the computer whose browser shows it), never 0.0.0.0.
+Requests must name 127.0.0.1 or that address as Host (no DNS rebinding).
 
 Runs `./fronk head` as a child and sends it the same keys a terminal user
 would ([p]roceed, [m]odified, [r]eport, [q]uit). Binds 127.0.0.1 only; every
@@ -15,12 +20,13 @@ import fronk_chats, fronk_files, fronk_report  # noqa: E402 - local UI helpers
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONF = os.path.join(ROOT, "fronk.conf")
 TOKEN = secrets.token_hex(16)
+ALLOWED_HOSTS = {"127.0.0.1", "localhost"}  # --listen adds its address
 STATE = {"proc": None, "lines": [], "secret": os.environ.get("FRONK_SECRET", ""),
          "keys": "", "started": 0.0, "activity": "", "activity_t": 0.0, "phase": "IDLE", "phase_t": 0.0,
          "auto": True}  # auto: answer Proceed when the plan fits
 FOLLOW_LOG = None
 LOCK = threading.Lock()
-CONTROL_LOCK = threading.Lock()  # serialize configuration changes and head lifecycle
+CONTROL_LOCK = threading.RLock()  # serialize configuration changes and head lifecycle
 PROMPT = re.compile(rb"\[[a-z]\][a-z]*( \([^)]*\))?: $")
 EDITABLE = ("model", "burst", "ds4", "interfaces", "state-dir", "head-blocks")
 # SSH aliases belong only to the development checkout. An upgraded install
@@ -163,6 +169,9 @@ def failure_of(lines):
     return next((line for line in reversed(errors) if "cycle" not in line), errors[-1] if errors else "")
 
 
+HEAD_LOG = os.path.expanduser("~/fronk-gsq-head/state/head.log")
+
+
 def reader(proc):
     buf = b""
     while True:
@@ -173,6 +182,12 @@ def reader(proc):
         # Prompts ("... [q]uit: ") end without a newline; flush them as soon as they appear.
         if ch == b"\n" or (buf.endswith(b": ") and PROMPT.search(buf)):
             line = buf.decode("utf-8", "replace").rstrip("\n")
+            # Keep the head output on disk too: after a console restart it explains a crash.
+            try:
+                with open(HEAD_LOG, "a") as log:
+                    log.write(time.strftime("%H:%M:%S ") + line + "\n")
+            except OSError:
+                pass
             with LOCK:
                 STATE["lines"].append(line)
                 # The head reads one key per prompt; only the keys it offers are accepted.
@@ -207,6 +222,11 @@ def ensure_nodes():
 
 
 def start_head(refresh):
+    with CONTROL_LOCK:
+        return _start_head(refresh)
+
+
+def _start_head(refresh):
     with LOCK:
         if STATE["proc"] and STATE["proc"].poll() is None:
             return "head already running"
@@ -247,18 +267,44 @@ def nodes(action):
     return f"nodes {action} sent"
 
 
-def stop_head():
+def stop_head(expected=None):
+    with CONTROL_LOCK:
+        return _stop_head(expected)
+
+
+def _stop_head(expected=None):
     """SIGTERM works at any moment; the head stops ds4 and closes its node sessions."""
     with LOCK:
         proc = STATE["proc"]
+        if expected is not None and proc is not expected:
+            return "head run already replaced"
     if not proc or proc.poll() is not None:
         return "head is not running"
+    engine_pid = None
+    try:
+        cfg = conf_read()
+        with open(os.path.join(ROOT, cfg.get("state-dir", "runs/state-head"), "ds4.pid")) as f:
+            candidate = int(f.read().strip())
+            if candidate > 1:
+                engine_pid = candidate
+    except (OSError, ValueError):
+        pass
     proc.terminate()
     try:
         proc.wait(timeout=15)
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
+    # The head's signal handler terminates the supervisor and exits immediately.
+    # Reaping its engines can take a few seconds; don't race the next Start.
+    if engine_pid:
+        deadline = time.monotonic()+15
+        while time.monotonic() < deadline:
+            try:
+                os.kill(engine_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(.1)
     return "head stopped"
 
 
@@ -268,6 +314,20 @@ def head_running():
 
 
 def send_key(key):
+    # Browser controls must work even while inference is busy in the C head.
+    if key == "q":
+        return stop_head()
+    if key == "m":
+        with CONTROL_LOCK:
+            with LOCK:
+                if not STATE["proc"] or STATE["proc"].poll() is not None:
+                    return "head is not running"
+                if "m" not in STATE["keys"]:
+                    return "the head is working; wait for its question"
+            stop_head()
+            # Warm dense engines distort free-RAM planning. Rebuild the process
+            # and its warmup state; compatible saved calibrations remain valid.
+            return start_head(False)
     with LOCK:
         proc = STATE["proc"]
         if not proc or proc.poll() is not None:
@@ -585,10 +645,20 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", kind)
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(data)
 
+    def host_allowed(self):
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]")
+        if host in ALLOWED_HOSTS:
+            return True
+        self.reply(421, json.dumps({"error": "unknown host"}))
+        return False
+
     def do_GET(self):
+        if not self.host_allowed():
+            return
         if self.path == "/api/cluster-report":
             with LOCK:
                 snapshot = view_of(list(STATE["lines"]))
@@ -651,6 +721,8 @@ class Handler(BaseHTTPRequestHandler):
                 live = {"observer": bool(FOLLOW_LOG), "head_name": os.uname().nodename.split(".")[0], "keys": STATE["keys"], "auto": STATE["auto"], "running": bool(terminal_head_pid()) if FOLLOW_LOG else bool(STATE["proc"] and STATE["proc"].poll() is None),
                         "elapsed": round(now - STATE["started"]) if STATE["started"] else 0,
                         "phase_age": round(now - STATE["phase_t"]) if STATE["phase_t"] else 0,
+                        "warmup": STATE.get("warmup", {}),
+                        "memory_guard": STATE.get("memory_guard", {"status": "disabled"}),
                         "activity": STATE["activity"], "activity_age": round(now - STATE["activity_t"]) if STATE["activity_t"] else 0,
                         "failure": failure_of(lines),
                         "lastline": next((l for l in reversed(lines) if l.strip() and not l.startswith("[nodes]")), "")}
@@ -665,6 +737,8 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(404, "{}")
 
     def do_POST(self):
+        if not self.host_allowed():
+            return
         if self.path in ("/start", "/stop", "/settings", "/api/context-size"):
             with CONTROL_LOCK:
                 return self.post_request()
@@ -797,6 +871,18 @@ if __name__ == "__main__":
     open_browser = "--open" in args
     if open_browser:
         args.remove("--open")
+    listen = None
+    if "--listen" in args:
+        i = args.index("--listen")
+        listen = args[i + 1] if i + 1 < len(args) else ""
+        del args[i:i + 2]
+        try:
+            address = ipaddress.IPv4Address(listen)
+        except ValueError:
+            sys.exit("--listen needs one IPv4 address of this machine")
+        if not address.is_private or address.is_loopback or address.is_unspecified:
+            sys.exit("--listen takes a private address (a direct cable), not " + listen)
+        ALLOWED_HOSTS.add(listen)
     port = int(args[0]) if args else 7730
     fronk_chats.migrate(OLD_CHATS)
     # Vision loads its text models on first use (~14 s); do it now, not on the first photo.
@@ -809,6 +895,13 @@ if __name__ == "__main__":
             raise
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     print(f"fronk console on http://127.0.0.1:{server.server_port}", flush=True)
+    if listen:
+        try:
+            remote = ThreadingHTTPServer((listen, server.server_port), Handler)
+        except OSError as error:
+            sys.exit(f"cannot listen on {listen}:{server.server_port}: {error} (is it an address of this machine?)")
+        threading.Thread(target=remote.serve_forever, daemon=True).start()
+        print(f"fronk console also on http://{listen}:{server.server_port}", flush=True)
     if launch_head and not FOLLOW_LOG:
         print(start_head(False), flush=True)
     if open_browser:

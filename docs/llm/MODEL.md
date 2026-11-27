@@ -31,6 +31,10 @@ can be done offline. Never upload model bytes to diagnose an installation.
 
 Twenty units cover all neuron ranges across all distributed experts/layers.
 Each unit has exactly 3,347,005,440 bytes. A `.tmp` transfer is not a valid unit.
+A head with the llama.cpp engine uses the GSQ-RCO file instead ([GSQ.md](../GSQ.md),
+`src/layout.h`, `src/gsq.h`): its units have another size, live in `state/gsq`
+and hold no shared expert. Establish which format the head runs before judging a
+size or a digest.
 The `.ok` stamp binds digest to file identity; copying to another filesystem may
 invalidate it even when bytes match. Let the normal verifier handle that case.
 Do not edit stamps to make an unverified cache appear usable.

@@ -17,7 +17,11 @@ this hardware and what it costs. Do not turn an appealing idea into a measured f
    exact supported GGUF, neuron ownership and lossless extraction.
 3. [PROTOCOL.md](../PROTOCOL.md), `src/head.c`, `src/plane.c`, `src/serve.c`:
    startup, layer barrier and dense engine boundary.
-4. [MEASUREMENTS.md](../MEASUREMENTS.md), [BACKENDS.md](../../BACKENDS.md),
+4. [GSQ.md](../GSQ.md) when the head runs the llama.cpp engine (its configuration
+   has `ds4 tools/engine/gsq/run.sh`): then also `src/layout.h`, `src/gsq.h`,
+   `src/hot.h` and the header of `tools/engine/gsq/run.sh`. Sizes, backends and
+   the engine boundary differ from the release path; do not mix the two.
+5. [MEASUREMENTS.md](../MEASUREMENTS.md), [BACKENDS.md](../../BACKENDS.md),
    [CONTRIBUTING.md](../../CONTRIBUTING.md),
    then only the source files relevant to the requested change.
 
@@ -48,7 +52,9 @@ explanation and the linked evidence.
 - One canonical model/layout contract. Do not silently requantize weights,
   change accumulation policy or relax the numerical oracle.
 - Every assigned participant is required. A missing partial is a generation
-  failure, not a lower-quality successful answer.
+  failure, not a lower-quality successful answer. An expert cache (GSQ path) is
+  the one exception by design: it only saves work, and the slices recompute its
+  experts if it stops answering.
 - Setup owns discovery, calibration, allocation and backend selection. Avoid
   adding work or negotiation to each layer call.
 - Buffers remain live until CPU/GPU/I/O completion, including failure paths.

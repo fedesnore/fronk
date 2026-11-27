@@ -26,7 +26,7 @@
 static int identity(const char *directory,unsigned block,char *text,size_t size) {
     char path[1024]; struct stat st;
     snprintf(path,sizeof(path),"%s/unit-%02u.bin",directory,block);
-    if (stat(path,&st) || (uint64_t)st.st_size!=FR_NATIVE_BLOCK_BYTES) return -1;
+    if (stat(path,&st) || (uint64_t)st.st_size!=fr_unit_bytes()) return -1;
 #ifdef __APPLE__
     long long ns=(long long)st.st_mtimespec.tv_sec*1000000000LL+st.st_mtimespec.tv_nsec;
 #else
@@ -79,7 +79,7 @@ static int skip_value(cursor *c,uint32_t type,int depth) {
     if (type>12 || !size[type] || (size_t)(c->end-c->p)<size[type]) return -1;
     c->p+=size[type]; return 0;
 }
-int fr_gguf_open(const char *path,fr_gguf *g) {
+static int native_open(const char *path,fr_gguf *g) {
     if (!path || !g) return -1;
     memset(g,0,sizeof(*g)); g->fd=-1;
     int fd=open(path,O_RDONLY); struct stat st;
@@ -153,12 +153,35 @@ bad:
     fr_gguf_close(g); return -1;
 }
 void fr_gguf_close(fr_gguf *g) {
-    if (g->map) munmap((void *)g->map,g->size);
-    if (g->fd>=0) close(g->fd);
+    if (g->layout==FR_LAYOUT_GSQ) fr_gsq_close(&g->gsq);
+    else {
+        if (g->map) munmap((void *)g->map,g->size);
+        if (g->fd>=0) close(g->fd);
+    }
+    memset(g,0,sizeof(*g)); g->fd=-1; g->gsq.fd=-1;
+}
+int fr_gguf_open(const char *path,fr_gguf *g) {
+    if (!path || !g) return -1;
+    if (!native_open(path,g)) { g->layout=FR_LAYOUT_NATIVE; g->gsq.fd=-1; return fr_layout_set(FR_LAYOUT_NATIVE); }
+    /* Not the ds4 file: the GSQ-RCO shard (its own validation, gsq.c). */
     memset(g,0,sizeof(*g)); g->fd=-1;
+    char error[256]; struct stat st;
+    if (fr_gsq_open(path,&g->gsq,error,sizeof(error))) { g->gsq.fd=-1; return -1; }
+    if (fstat(g->gsq.fd,&st)) { fr_gsq_close(&g->gsq); g->gsq.fd=-1; return -1; }
+    g->layout=FR_LAYOUT_GSQ; g->fd=g->gsq.fd; g->map=g->gsq.map; g->size=g->gsq.size;
+#ifdef __APPLE__
+    g->mtime=(uint64_t)st.st_mtimespec.tv_sec*1000000000u+(uint64_t)st.st_mtimespec.tv_nsec;
+#else
+    g->mtime=(uint64_t)st.st_mtim.tv_sec*1000000000u+(uint64_t)st.st_mtim.tv_nsec;
+#endif
+    return fr_layout_set(FR_LAYOUT_GSQ);
 }
 /* Gathers one (layer, expert) slice into out; returns its byte count. */
 size_t fr_slice_copy(const fr_gguf *g,unsigned block,unsigned l,unsigned e,void *output,size_t capacity) {
+    if (g && g->layout==FR_LAYOUT_GSQ) {  /* routed experts only: the head computes the shared one */
+        if (!g->map || block>=FR_BLOCKS || l>=FR_LAYERS || e>=FR_ROUTED_EXPERTS || !output || capacity<fr_gsq_slice_bytes(l)) return 0;
+        return fr_gsq_slice(&g->gsq,block,l,e,output)?0:fr_gsq_slice_bytes(l);
+    }
     size_t need=e<FR_ROUTED_EXPERTS?FR_NATIVE_SLICE_BYTES:FR_NATIVE_SHARED_BYTES;
     if (!g || !g->map || block>=FR_BLOCKS || l>=FR_LAYERS || e>=FR_EXPERTS || !output || capacity<need) return 0;
     unsigned char *out=output;
@@ -180,6 +203,19 @@ size_t fr_slice_copy(const fr_gguf *g,unsigned block,unsigned l,unsigned e,void 
 }
 int fr_unit_stream(const fr_gguf *g,unsigned block,fr_sink sink,void *ctx) {
     if (!g || !g->map || block>=FR_BLOCKS || !sink) return -1;
+    if (g->layout==FR_LAYOUT_GSQ) {  /* one layer's 512 slices at a time, in gsq.h order */
+        size_t cap=0; for (unsigned l=0;l<FR_LAYERS;++l) if (FR_ROUTED_EXPERTS*fr_gsq_slice_bytes(l)>cap) cap=FR_ROUTED_EXPERTS*fr_gsq_slice_bytes(l);
+        unsigned char *buf=malloc(cap); int rc=buf?0:-1;
+        for (unsigned l=0;!rc && l<FR_LAYERS;++l) {
+            size_t used=0;
+            for (unsigned e=0;!rc && e<FR_ROUTED_EXPERTS;++e) {
+                size_t copied=fr_slice_copy(g,block,l,e,buf+used,cap-used);
+                if (!copied) rc=-1; else used+=copied;
+            }
+            if (!rc) rc=sink(ctx,buf,used);
+        }
+        free(buf); return rc;
+    }
     size_t cap=(size_t)64*FR_NATIVE_SLICE_BYTES; unsigned char *buf=malloc(cap); int rc=buf?0:-1;
     for (unsigned l=0;!rc && l<FR_LAYERS;++l) {
         size_t used=0;

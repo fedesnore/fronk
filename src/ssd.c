@@ -12,7 +12,9 @@
 #include <time.h>
 #include <unistd.h>
 #define KEYS (FR_BLOCKS*FR_LAYERS*FR_ROUTED_EXPERTS)
-#define JOBS (FR_SSD_MAX_BLOCKS*(FR_MAX_BURST*FR_ACTIVE_ROUTED+1))
+/* Only the Metal backend streams from SSD, and it runs at most 8 tokens per call. */
+#define SSD_BURST 8
+#define JOBS (FR_SSD_MAX_BLOCKS*(SSD_BURST*FR_ACTIVE_ROUTED+1))
 typedef struct { unsigned key; uint64_t age; } entry;
 typedef struct { int fd,slot; off_t offset; size_t bytes; unsigned char *target; unsigned block; unsigned char *stage; } read_job;
 struct fr_ssd {
@@ -99,7 +101,7 @@ int fr_ssd_detach(fr_ssd *s,unsigned block) {
     return rc?FR_IO:FR_OK;
 }
 int fr_ssd_load_ready(fr_ssd *s,const fr_req *r,uint32_t mask,void *layers[FR_BLOCKS],fr_ssd_ready_fn ready,void *context) {
-    if (!s || !r || !layers || !mask || mask>=(1u<<FR_BLOCKS) || r->layer>=FR_LAYERS || !r->burst || r->burst>FR_MAX_BURST) return FR_INVALID;
+    if (!s || !r || !layers || !mask || mask>=(1u<<FR_BLOCKS) || r->layer>=FR_LAYERS || !r->burst || r->burst>SSD_BURST) return FR_INVALID;
     unsigned char selected[FR_ROUTED_EXPERTS]={0}; int shared=0;
     for (unsigned t=0;t<r->burst;++t) {
         for (unsigned e=0;e<FR_ACTIVE_ROUTED;++e) {

@@ -44,6 +44,21 @@ connection decide how many slices it gets. The head waits for the nodes 48 times
 per model pass, so the cables matter too. [PROJECT.md](PROJECT.md) explains the
 design, the measurements and where each part lives in the code.
 
+### New in the source: a smaller model file and a second head engine
+
+The source after 0.3.0 can also run a 3-bit conversion of the same model
+(GSQ-RCO). Its experts take 44 GB of the cluster's memory instead of 67 GB. The
+engine of 0.3.0 cannot read that file's formats and llama.cpp can, so this path
+uses llama.cpp for the head's dense part, with one patch that sends the routed
+experts to the cluster. Nodes get a matching CPU backend. A machine that is fast
+but short of memory can also serve as a cache of the experts in use, beside the
+nodes that hold slices. On my five computers this path wrote short replies at a
+median of 25.8 tokens per second ([how it was measured](docs/GSQ.md#measured-speed)).
+
+It is built from a checkout on an Apple Silicon head; the downloads below are
+still 0.3.0. Read [why and how](docs/GSQ.md) and
+[what changed in 0.7.0](docs/releases/0.7.0.md).
+
 ## Will it work on your machines?
 
 | What | You need |
@@ -139,8 +154,8 @@ what has not.
 ## License and credits
 
 Fronk is [MIT licensed](LICENSE), copyright Federico Russo. The Metal head
-builds on Salvatore Sanfilippo's DwarfStar/ds4; the Vulkan adapter builds on
-llama.cpp. See [THIRD_PARTY.md](THIRD_PARTY.md) for their licenses and notices.
+builds on Salvatore Sanfilippo's DwarfStar/ds4; the Vulkan adapter and the GSQ
+head build on llama.cpp, and the GSQ node backend on ggml's kernels. See [THIRD_PARTY.md](THIRD_PARTY.md) for their licenses and notices.
 Model weights have their own Qwen license and are downloaded separately.
 
 It could be worse. It could be “quite terrible” to have RAM in your own computer.

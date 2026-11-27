@@ -15,9 +15,10 @@ SRC_TREE=$(cd "$HERE/../.." && pwd -P)
 VERSION=$(sed -n 's/^VERSION := //p' "$SRC_TREE/Makefile")
 PREFIX=${FRONK_PREFIX:-$HOME/fronk}
 source "$HERE/model.conf"
+source "$HERE/model-gsq.conf"
 label=ai.fronk.node
 role="" name="" nodes="" node_burst="" model="" download_dir="" action="" yes=0 secret_stdin=0 download=0 purge=0 no_service=0 dialog=0 gui=0 measure=1 demo_later=0 model_ready=0
-module_paths=() custom_modules=() requested_backend=""
+module_paths=() custom_modules=() requested_backend="" engine=""
 say() { printf '%s\n' "$*"; }
 step() { printf '\n== %s\n' "$*"; }
 # Every stop says where help is: the installed guides once they exist. The briefs
@@ -71,6 +72,8 @@ Fronk Installer Manager $VERSION
   --no-measure                       defer RAM benchmarks; skip SSD calibration
   --backend-module FOLDER            add a source module (repeat for more than one)
   --backend NAME                     select this compatible expert backend
+  --engine ds4|gsq                   head dense engine: ds4 (Q4 GGUF, default) or gsq
+                                     (GSQ-RCO IQ3_XXS with llama.cpp; make gsq-engine first)
   --demo-later                       pause after pairing; resume with --join-nodes
   --model FILE|FOLDER | --download   verify local GGUF or download after the measured demo
   --download-dir FOLDER              destination for a resumed or new download
@@ -86,10 +89,10 @@ HELP
 args=("$@")
 while (($#)); do
     case $1 in
-        --role|--name|--nodes|--model|--prefix|--download-dir|--burst|--backend-module|--backend)
+        --role|--name|--nodes|--model|--prefix|--download-dir|--burst|--backend-module|--backend|--engine)
             [[ $# -ge 2 && -n $2 && $2 != --* ]] || die "$1 needs a value"
             case $1 in
-                --backend-module) module_paths+=("$2") ;; --backend) requested_backend=$2 ;;
+                --backend-module) module_paths+=("$2") ;; --backend) requested_backend=$2 ;; --engine) engine=$2 ;;
                 --burst) node_burst=$2 ;; --role) role=$2 ;; --name) name=$2 ;; --nodes) nodes=$2 ;;
                 --model) model=$2 ;; --download-dir) download_dir=$2 ;; --prefix) PREFIX=$2 ;;
             esac; shift ;;
@@ -287,7 +290,17 @@ say "Start from the head. Tested head: Apple Silicon with Metal. Choose node on 
 [[ -n $role ]] || role=$(ask "Install this machine as head or node?" "${installed:-$suggest}" "head|node")
 [[ $role == head || $role == node ]] || die "choose head or node"
 gpu_head=0
-if [[ $role == head && ( $OS != Darwin || $ARCH != arm64 ) ]]; then gpu_head=1; fi
+# The GSQ engine: chosen once, then kept by the installed configuration.
+[[ -n $engine || $installed != head || $(config_value ds4) != tools/engine/gsq/run.sh ]] || engine=gsq
+[[ -z $engine || $engine == ds4 || $engine == gsq ]] || die "--engine is ds4 or gsq"
+gsq_head=0
+if [[ $role == head && $engine == gsq ]]; then
+    [[ $OS == Darwin && $ARCH == arm64 ]] || die "the GSQ head engine runs on Apple Silicon"
+    [[ -x $SRC_TREE/build/gsq-engine/fronk-llama-server ]] || die "the GSQ engine is not built: run make gsq-engine in the Fronk source first"
+    gsq_head=1
+elif [[ $role != head && -n $engine ]]; then die "--engine applies to a head"
+fi
+if [[ $role == head && $gsq_head == 0 && ( $OS != Darwin || $ARCH != arm64 ) ]]; then gpu_head=1; fi
 if ((gpu_head)); then say "This platform uses the experimental Vulkan head. A GPU check is required, but full installer-to-chat qualification is still pending. The tested head is Apple Silicon with Metal."; fi
 [[ -z $installed || $installed == "$role" ]] || die "this prefix contains a $installed; use another prefix for a different role"
 if [[ $role == node ]]; then
@@ -312,7 +325,7 @@ fi
 for tool in cc make python3; do command -v "$tool" >/dev/null || die "$tool is required (macOS: install the command line tools and Python 3; Debian/Ubuntu: install build-essential python3)"; done
 if [[ $OS == Darwin ]]; then xcode-select -p >/dev/null || die "install Xcode command line tools with xcode-select --install, then reopen the manager"; fi
 if [[ $role == head ]]; then
-    ((gpu_head)) || [[ -d $SRC_TREE/ds4 ]] || die "use the downloadable manager built by make dist; it includes the patched ds4 engine"
+    ((gpu_head || gsq_head)) || [[ -d $SRC_TREE/ds4 ]] || die "use the downloadable manager built by make dist; it includes the patched ds4 engine"
     command -v openssl >/dev/null || die "openssl is required for head pairing and model verification"
     command -v python3 >/dev/null || die "the head console requires Python 3"
 fi
@@ -370,6 +383,12 @@ if ((gpu_head)); then
     ((gpu_free >= 5399825920)) || die "the dense layers and output alone need 5.40 GB of free GPU memory, plus context buffers. Free GPU memory and retry, or use this machine as a node."
     say "The dense layers and output need 5.40 GB of GPU memory before context buffers."
     say "The dense layers will load on $device ($((gpu_bytes/1048576)) MiB, $gpu_memory memory). Fronk can assign expert blocks to this machine's CPU and system RAM alongside the other nodes."
+elif ((gsq_head)); then
+    step "Head · GSQ engine"
+    mkdir -p "$stage/build/gsq-engine"
+    cp "$SRC_TREE/build/gsq-engine/fronk-llama-server" "$stage/build/gsq-engine/"
+    [[ ! -x $SRC_TREE/build/gsq-engine/gpu-keepalive ]] || cp "$SRC_TREE/build/gsq-engine/gpu-keepalive" "$stage/build/gsq-engine/"
+    say "Dense engine: llama.cpp with Fronk's expert hook (attention, shared expert and logits on this Mac's GPU)."
 elif [[ $role == head ]]; then
     mkdir "$stage/ds4"
     (cd "$SRC_TREE/ds4" && tar --exclude '*.o' --exclude '*.a' -cf - .) | tar -xf - -C "$stage/ds4"
@@ -380,7 +399,7 @@ fi
 say "Building Fronk. Progress is in $STATE/build.log"
 make -C "$stage" fronk fronk-cli DS4="$ds4" >"$STATE/build.log" 2>&1 || die "build failed; see $STATE/build.log"
 check_backend_modules
-if [[ $role == head && $gpu_head == 0 ]]; then
+if [[ $role == head && $gpu_head == 0 && $gsq_head == 0 ]]; then
     step "Head · Verify Metal on this Mac"
     (cd "$stage" && ./fronk backends --test metal) > "$STATE/head-gpu.log" 2>&1 ||
         die "the Metal compute test failed. Check $STATE/head-gpu.log before setting up nodes."
@@ -412,6 +431,11 @@ if [[ ! -f $CONF ]]; then
       if [[ $role == head ]]; then echo "name head"; echo "burst 3"; echo "ds4 builtin"; else echo "burst 1"; fi
     } > "$CONF"
 fi
+if ((gsq_head)); then
+    set_conf ds4 tools/engine/gsq/run.sh
+    set_conf burst 4   # one MTP verification pass carries up to 4 tokens
+    [[ -f $STATE/ds4-ctx ]] || echo 65536 > "$STATE/ds4-ctx"
+fi
 if ((gpu_head)); then
     set_conf ds4 tools/gpu-head/run.sh
     set_conf burst 1
@@ -441,7 +465,8 @@ mv "$STATE/install-files.new" "$STATE/install-files"
 printf '%s\n' "$role" > "$STATE/install-role"
 printf '%s\n' "$role" > "$PREFIX/.fronk-manager"
 if [[ $role == head ]]; then
-    if ((!gpu_head)); then say "Dense head engine: ds4 Metal on the Apple GPU."; fi
+    if ((gsq_head)); then say "Dense head engine: llama.cpp (GSQ-RCO IQ3_XXS) on the Apple GPU."
+    elif ((!gpu_head)); then say "Dense head engine: ds4 Metal on the Apple GPU."; fi
     step "Head · Backend for local expert blocks"
     say "This choice controls expert blocks assigned to this computer. The dense model runs on the GPU."
 else step "Node · Expert compute backend"; fi

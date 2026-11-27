@@ -40,7 +40,7 @@ int main(void) {
     unsigned char small[1376]; memset(small,0xa5,sizeof(small));
     check(!fr_req_encode(small,1375,&req,values,1,1,0) && small[0]==0xa5 && small[1375]==0xa5,"insufficient capacity rejected before writing");
     req.burst=0; check(!fr_req_encode(small,sizeof(small),&req,values,1,1,0),"zero burst rejected");
-    req.burst=9; check(!fr_req_encode(small,sizeof(small),&req,values,1,1,0),"oversized burst rejected");
+    req.burst=FR_MAX_BURST+1; check(!fr_req_encode(small,sizeof(small),&req,values,1,1,0),"oversized burst rejected");
     req.burst=8; check(!fr_req_encode(small,sizeof(small),&req,values,1,1,32),"fragment beyond burst rejected");
     check(fr_req_encode(small,sizeof(small),&req,values,1,0,0)==1376 && !u32(small+12),"decode step zero is a valid wire counter");
     int roundtrip=1;

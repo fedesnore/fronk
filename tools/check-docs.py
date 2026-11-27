@@ -40,7 +40,7 @@ names = ["README.md", "AGENTS.md", "docs/README.md", "PROJECT.md", "CONTRIBUTING
          "docs/API.md", "docs/TEST_CLUSTER.md", "docs/ABOUT.md", "docs/PROJECTIONS.md"]
 names += [str(p.relative_to(root)) for folder in ("docs/llm", "docs/evidence", "docs/releases")
           for p in sorted((root / folder).glob("*.md"))]
-names += ["docs/PLAN-mtp-native.md"]
+names += ["docs/PLAN-mtp-native.md", "docs/PLAN-gsq-rco.md", "docs/GSQ.md"]
 errors = []
 for name in names:
     path = root / name

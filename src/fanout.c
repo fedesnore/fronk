@@ -18,6 +18,9 @@ int fanout_close(fr_fanout *fanout) {
     fanout->count=0; return rc;
 }
 int fanout_open(const fr_connection *selected,const char *multicast,unsigned group_port,fr_fanout *out) {
+    return fanout_open_split(selected,multicast,group_port,0,out);
+}
+int fanout_open_split(const fr_connection *selected,const char *multicast,unsigned group_port,uint32_t split,fr_fanout *out) {
     if (!selected || !out || !selected->count || selected->count>FR_CONNECTION_NODES || !group_port) return -1;
     fr_fanout plan={0}; struct sockaddr_in group;
     if (net_address(multicast,group_port,&group) || !IN_MULTICAST(ntohl(group.sin_addr.s_addr))) return -1;
@@ -40,7 +43,7 @@ int fanout_open(const fr_connection *selected,const char *multicast,unsigned gro
     }
     for (unsigned i=0;i<plan.count;++i) {
         fr_fanout_group *g=&plan.groups[i];
-        int wanted=interface_multicast_wanted(g->via.type,g->count);
+        int wanted=interface_multicast_wanted(g->via.type,g->count) && !(g->members&split);
         for (unsigned j=0;wanted && j<selected->count;++j)
             if ((g->members&(1u<<j)) && !selected->links[j].multicast) wanted=0; /* unicast to each */
         g->multicast=wanted;
@@ -57,6 +60,26 @@ int fanout_open(const fr_connection *selected,const char *multicast,unsigned gro
     *out=plan; return 0;
 failed:
     (void)fanout_close(&plan); return -1;
+}
+int fanout_send_mask(fr_fanout *fanout,uint32_t mask,const void *packet,size_t bytes) {
+    if (!fanout || !packet || !bytes || bytes>FR_FRAME_MAX || !fanout->count || fanout->count>FR_INTERFACES) return -1;
+    for (unsigned i=0;i<fanout->count;++i) {
+        fr_fanout_group *g=&fanout->groups[i];
+        if (!(g->members&mask)) continue;
+        if (g->multicast && (g->members&mask)!=g->members) return -1;
+        unsigned member=0;
+        for (unsigned link=0;link<FR_CONNECTION_NODES;++link) {
+            if (!(g->members>>link&1)) continue;
+            const unsigned j=member++;
+            if (!g->multicast && !(mask>>link&1)) continue;
+            if (g->multicast && j) break;
+            ssize_t n; int fd=g->multicast?g->fd:g->unicast_fd[j];
+            do { n=send(fd,packet,bytes,0); } while (n<0 && errno==EINTR);
+            if (n!=(ssize_t)bytes && !(n<0 && (errno==ECONNREFUSED || errno==EHOSTDOWN || errno==EHOSTUNREACH))) return -1;
+            ++g->packets; g->bytes+=bytes;
+        }
+    }
+    return 0;
 }
 int fanout_send(fr_fanout *fanout,const void *packet,size_t bytes) {
     if (!fanout || !packet || !bytes || bytes>FR_FRAME_MAX || !fanout->count || fanout->count>FR_INTERFACES) return -1;

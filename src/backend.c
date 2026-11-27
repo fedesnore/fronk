@@ -24,6 +24,9 @@ static const fr_backend *const compiled[]={&fr_ref,&fr_ref_q8,
 #ifdef FR_AVX2_COMPUTE
     &fr_avx2,
 #endif
+#ifdef FR_GSQ_COMPUTE
+    &fr_gsq,
+#endif
 #ifdef FR_USER_BACKEND
     &fr_user,
 #endif

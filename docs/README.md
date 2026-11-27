@@ -14,6 +14,7 @@ you want its help, and you do not need to read them.
 | Check what I need, then install | [Installation guide](INSTALL.md) |
 | Connect the computers: cables, addresses, firewalls | [Connect the head and nodes](NETWORK.md) |
 | Find or verify the model file | [Supported model and weights](MODEL.md) |
+| Run the smaller 3-bit weights with the llama.cpp head | [The llama.cpp head and the 3-bit weights](GSQ.md) (from a checkout) |
 | Use my own chat client or agent | [Local API](API.md) |
 | Upgrade, uninstall or start fresh | [Installation guide](INSTALL.md#upgrade-uninstall-and-start-fresh) |
 
@@ -30,6 +31,8 @@ you want its help, and you do not need to read them.
 | I want to... | Read |
 |---|---|
 | Learn why it is built this way and where the code lives | [How Fronk works](../PROJECT.md) |
+| Know why there are two head engines and two kinds of node | [The llama.cpp head and the 3-bit weights](GSQ.md) |
+| See what changed since 0.3.0 | [Fronk 0.7.0](releases/0.7.0.md) |
 | See the real test machines and results | [The computers on my desk](TEST_CLUSTER.md) |
 | See the numbers behind the design | [Measurements](MEASUREMENTS.md) |
 | Estimate other clusters | [Projections](PROJECTIONS.md) (conditional, not measured) |
@@ -51,5 +54,7 @@ you want its help, and you do not need to read them.
 
 [Building and qualifying a release](RELEASE.md) ·
 [Release 0.3.0 record](releases/0.3.0.md) ·
+[0.7.0 source version](releases/0.7.0.md) ·
+[Working notes of the GSQ port](PLAN-gsq-rco.md) ·
 [Third-party notices](../THIRD_PARTY.md) ·
 [Raw evidence](evidence/SHUTTLE.md)

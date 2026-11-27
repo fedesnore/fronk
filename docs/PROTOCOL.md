@@ -91,6 +91,10 @@ fronk-cli -h NODE_IP --config NODE_CONFIG UNITS
 | `RECV block sha256` | Receive a missing native weight unit |
 | `SESSION START id unit-mask burst deadline-us`, `SESSION STOP` | Start/stop a selected backend and its data-plane receiver |
 | `EXPERT-ORDER` | Advertise the current expert-order capability for compatible research paths |
+| `LAYOUT native\|gsq` | The unit format of this head's model. A head with the Q4 file sends nothing, so the default stays native |
+| `PACE` | In a session: a reply of several datagrams waits until the head asks for it, so nodes behind one head interface answer in turn |
+| `WIRE-Q8K` | Ask whether this node accepts Q8_K requests; it answers `q8k-v1` only with GSQ units loaded |
+| `SESSION CACHE id megabytes burst deadline-us`, `HOT layer expert`, `COLD layer expert` | Start an expert cache on a node without units, then copy one whole expert into it or release one (GSQ only) |
 
 This is a lifecycle map, not a promise that every command takes arbitrary
 arguments; exact validation is in `node.c` and `tests/test_node.c`. A linked
@@ -99,7 +103,8 @@ session. The node's event loop remains available for inspection while a worker
 runs a benchmark; long computation is not performed inside RESP dispatch.
 
 `RECV` accepts a unit index and expected lowercase SHA-256, acknowledges readiness,
-then consumes exactly **3,347,005,440 raw bytes** on that TCP connection. It hashes
+then consumes exactly **3,347,005,440 raw bytes** on that TCP connection (a
+native unit; in a GSQ session, the size of a GSQ unit). It hashes
 while writing a temporary file, checks the digest, renames/publishes the unit
 and returns success. A failed transfer must not be treated as a usable unit.
 TCP supplies ordered delivery/retransmission for setup; unit hashes check model
@@ -193,7 +198,7 @@ The 24-byte `FRK1` header has this layout (offsets in bytes):
 | Offset | Size | Field |
 |---|---:|---|
 | 0 | 4 | Magic `FRK1` |
-| 4 | 1 | Type: 1 REQ, 2 PART, 3 probe PING, 4 probe PONG |
+| 4 | 1 | Type: 1 REQ, 2 PART, 3 probe PING, 4 probe PONG, 5 REQ with Q8_K activations (GSQ sessions, opt-in) |
 | 5 | 1 | Node index; 255 for head-originated requests |
 | 6 | 1 | Burst width |
 | 7 | 1 | Reserved, zero |
@@ -244,14 +249,37 @@ sums must not be returned as successful generation.
 There is no per-fragment acknowledgment or retransmission in the UDP plane.
 A lost fragment can leave a request or reply incomplete at its deadline. The
 ordinary generation path in `src/serve.c` waits up to 500 ms for a complete sum;
-if a participant is missing, it retries the **whole expert call once**, with a
-new step ID and a 1 s deadline. The new step excludes late packets from the
-first attempt and replaces the entire sum; it does not add a duplicate result.
-If the retry is still incomplete, generation fails instead of using a partial
-sum. The synthetic demo reports missing replies as a failure, without this
+if a participant is missing, it asks the **whole expert call again**, alone on
+the wire, with a new step ID each time and deadlines of 1, 2, 4, 8 and 15 s. A
+new step excludes late packets from the earlier attempts and replaces the entire
+sum; it does not add a duplicate result. A node that stalls for a few seconds
+therefore pauses the chat. If the last attempt is still incomplete, generation
+fails instead of using a partial sum. One case is not a failure: when the only
+silent participant is an expert cache, its experts return to the slice nodes
+and the same call is asked from them. The synthetic demo reports missing replies as a failure, without this
 generation retry. Diagnostics distinguish invalid, late, duplicate and missing
 data. Keep these finite deadlines and clear error behavior when experimenting
 with another transport; they are not a guarantee of UDP delivery.
+
+### GSQ sessions: wider calls and Q8_K requests
+
+A head with the llama.cpp engine reads prompts 64 tokens at a time, so its calls
+are wider: up to 32 tokens each, with two calls in flight for the two halves of
+a batch. The `gsq` backend accepts that width directly. The Metal backend,
+built for 8 tokens, splits a wider call into consecutive chunks.
+
+The GSQ kernels take their input as Q8_K: ten blocks of 292 bytes for the 2,560
+dimensions of one activation. When the head's state directory has a file named
+`wire-q8k` and every active node answers `q8k-v1` to `WIRE-Q8K`, the head
+quantizes each activation once and sends type 5 requests. The four logical
+ranges of a token then carry 3, 3, 2 and 2 blocks, so the completion bitmaps
+work as for FP16. If any node does not confirm, the head refuses to start with
+this transport; it never falls back silently.
+
+| Payload | Bytes per token |
+|---|---:|
+| Q8_K request | 3,112 |
+| One node reply (FP16, unchanged) | 5,248 |
 
 ## What reduces transport overhead today
 
@@ -322,7 +350,10 @@ event resume; it does not send an HTTP or RESP request for each layer.
 
 The Vulkan adapter uses a local socket bridge defined in
 [fronk_client.h](../client/fronk_client.h) to reach the same expert service.
-That local bridge is distinct from the remote `FRK1` protocol. In both cases the
+The llama.cpp engine of the GSQ path uses the same bridge: it is a separate
+process, and its hook sends each layer's routed-expert inputs to the head's
+socket and waits for the sum (see [GSQ.md](GSQ.md#who-computes-what)).
+That local bridge is distinct from the remote `FRK1` protocol. In all cases the
 backend sees `fr_req`/`fr_part` with FP32 arrays after network conversion. A new
 CPU/GPU expert backend implements that compute contract, not discovery, sockets
 or model downloading. See [BACKENDS.md](../BACKENDS.md).
